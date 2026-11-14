@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "codesync-web",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2025-07-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "codesync-web"
+    }
+  ],
+  "vars": {
+    "CODE_SYNC_API_ORIGIN": "https://codesync-api.example.workers.dev"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

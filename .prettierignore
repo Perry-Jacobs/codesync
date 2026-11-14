@@ -1,0 +1,11 @@
+.next
+.next-build
+.open-next
+.wrangler
+**/.wrangler
+**/node_modules
+public/monaco
+.preview-captures
+coverage
+package-lock.json
+workers/codesync/package-lock.json

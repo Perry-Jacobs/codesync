@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "codesync-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOM_DO",
+        "class_name": "RoomDurableObject",
+      },
+      {
+        "name": "DOCUMENT_DO",
+        "class_name": "DocumentDurableObject",
+      },
+      {
+        "name": "RATE_LIMIT_DO",
+        "class_name": "RateLimitDurableObject",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RoomDurableObject", "DocumentDurableObject"],
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["RateLimitDurableObject"],
+    },
+  ],
+  "vars": {
+    "ALLOWED_ORIGINS": "http://localhost:3000",
+    "PUBLIC_APP_URL": "http://localhost:3000",
+    "MAX_PARTICIPANTS": "8",
+    "ROOM_CREATE_LIMIT": "30",
+    "ROOM_CREATE_WINDOW_SECONDS": "600",
+    "STUN_SERVERS": "stun:stun.l.google.com:19302",
+  },
+}

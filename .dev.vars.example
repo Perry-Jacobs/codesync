@@ -1,0 +1,4 @@
+# Local OpenNext/Workers development values. Copy to .dev.vars and adjust.
+# NEXT_PUBLIC_WS_URL is embedded by Next.js at build time, so pass it to the
+# frontend command directly instead of storing it only in .dev.vars.
+CODE_SYNC_API_ORIGIN=http://localhost:8787

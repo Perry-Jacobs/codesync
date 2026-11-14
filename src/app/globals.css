@@ -1,0 +1,203 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-sans:
+      -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    --font-mono:
+      "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, Menlo,
+      monospace;
+
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 210 100% 45%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 30% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 30% 96%;
+    --muted-foreground: 215 16% 42%;
+    --accent: 210 40% 94%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 25% 88%;
+    --input: 214 25% 88%;
+    --ring: 210 100% 45%;
+    --radius: 0.6rem;
+
+    --vs-bg: 0 0% 100%;
+    --vs-panel: 210 30% 98%;
+    --vs-sidebar: 210 30% 97%;
+    --vs-border: 214 25% 88%;
+    --vs-text: 222 47% 11%;
+    --vs-muted: 215 16% 45%;
+    --vs-accent: 210 100% 45%;
+    --vs-success: 142 70% 36%;
+    --vs-danger: 0 72% 51%;
+  }
+
+  .dark {
+    --background: 220 16% 8%;
+    --foreground: 213 24% 92%;
+    --card: 220 15% 10%;
+    --card-foreground: 213 24% 92%;
+    --popover: 220 16% 9%;
+    --popover-foreground: 213 24% 92%;
+    --primary: 207 100% 62%;
+    --primary-foreground: 220 40% 8%;
+    --secondary: 220 12% 15%;
+    --secondary-foreground: 213 24% 92%;
+    --muted: 220 12% 15%;
+    --muted-foreground: 215 12% 62%;
+    --accent: 220 12% 18%;
+    --accent-foreground: 213 24% 96%;
+    --destructive: 0 74% 58%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 12% 19%;
+    --input: 220 12% 20%;
+    --ring: 207 100% 62%;
+
+    --vs-bg: 220 16% 8%;
+    --vs-panel: 220 15% 10%;
+    --vs-sidebar: 220 16% 9%;
+    --vs-border: 220 12% 18%;
+    --vs-text: 213 24% 92%;
+    --vs-muted: 215 12% 62%;
+    --vs-accent: 207 100% 62%;
+    --vs-success: 137 55% 55%;
+    --vs-danger: 0 74% 60%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.28);
+  }
+
+  *:focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 999px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .surface {
+    background: hsl(var(--vs-panel));
+    border: 1px solid hsl(var(--vs-border));
+  }
+
+  .grid-backdrop {
+    background-image:
+      linear-gradient(hsl(var(--border) / 0.55) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--border) / 0.55) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(
+      ellipse 60% 60% at 50% 40%,
+      black 40%,
+      transparent 100%
+    );
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* ── Monaco decorations for remote collaborators ───────────────────── */
+.remote-caret-widget {
+  width: 2px;
+  height: var(--rc-line-height, 20px);
+  z-index: 20;
+  pointer-events: none;
+}
+
+.remote-caret {
+  width: 2px;
+  height: 100%;
+  margin-left: -1px;
+  background: var(--rc-color, #4ea1ff);
+}
+
+.remote-cursor-label {
+  position: absolute;
+  bottom: 100%;
+  left: -1px;
+  padding: 1px 5px;
+  border-radius: 4px 4px 4px 0;
+  background: var(--rc-color, #4ea1ff);
+  color: #0b1220;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.remote-caret-widget.rc-first-line .remote-cursor-label {
+  bottom: auto;
+  top: 100%;
+  border-radius: 0 4px 4px 4px;
+}
+
+.remote-selection {
+  background: color-mix(in srgb, var(--rc-color, #4ea1ff) 26%, transparent);
+  border-radius: 2px;
+}
+
+.monaco-editor .margin,
+.monaco-editor .monaco-editor-background {
+  background-color: hsl(var(--vs-bg)) !important;
+}
+
+.monaco-editor .scrollbar .slider {
+  border-radius: 999px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
