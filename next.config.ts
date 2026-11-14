@@ -5,6 +5,13 @@ import type { NextConfig } from "next";
  * scripts/copy-monaco.mjs). That keeps webpack out of the Monaco worker
  * pipeline entirely and makes the CSP deterministic.
  */
+const apiOrigin = process.env.NEXT_PUBLIC_API_URL?.trim().replace(/\/$/, "");
+
+const connectSources = ["'self'", "ws:", "wss:"];
+if (apiOrigin?.startsWith("https://")) {
+  connectSources.push(apiOrigin);
+}
+
 const csp = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
@@ -13,7 +20,7 @@ const csp = [
   "font-src 'self' data:",
   "media-src 'self' blob:",
   "worker-src 'self' blob:",
-  "connect-src 'self' ws: wss:",
+  `connect-src ${connectSources.join(" ")}`,
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
