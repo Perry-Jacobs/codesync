@@ -57,7 +57,19 @@ server/                 Legacy Node/Redis backend, retained only for reference
 docker/                 Legacy local Redis/coturn configuration
 ```
 
-## Local Cloudflare development
+## Local development against the deployed Cloudflare backend
+
+The recommended local workflow runs the Next.js frontend on `http://localhost:3000` and connects it to the deployed Cloudflare API and Durable Objects:
+
+```bash
+npm run dev:web
+```
+
+This mode is intended for testing UI and application changes without deploying them. The deployed backend must allow `http://localhost:3000` as an origin, which the GitHub deployment workflow configures automatically.
+
+Local changes remain on your machine until they are reviewed, committed, and pushed. Pushing to `main` runs the GitHub Actions workflows that deploy the frontend and API Workers.
+
+## Fully local Cloudflare development
 
 Install both dependency trees:
 
@@ -72,18 +84,15 @@ Start the API Worker on port `8787`:
 npm run cf:backend:dev
 ```
 
-In another terminal, start the Next.js frontend:
+In another terminal, start the Next.js frontend on port `3000`:
 
 ```bash
-NEXT_PUBLIC_API_URL=http://localhost:8787 \
-NEXT_PUBLIC_WS_URL=ws://localhost:8787/ws \
-CODE_SYNC_API_ORIGIN=http://localhost:8787 \
-npm run dev:web
+npm run dev:web:local
 ```
 
-`npm run dev:web` starts only the Next.js frontend. `npm run dev` starts the legacy Node/Redis backend instead and is documented separately below.
+`npm run dev:web:local` points the frontend at `http://localhost:8787`. The legacy `npm run dev` command starts the original Node/Redis backend instead and is documented separately below.
 
-The local Node/Redis app uses only application port `3000`; its WebSocket endpoint is `ws://localhost:3000/ws`. Redis remains a required internal data service.
+The legacy Node/Redis app uses only application port `3000`; its WebSocket endpoint is `ws://localhost:3000/ws`. Redis remains a required internal data service in that legacy mode.
 
 ## Legacy local Node/Redis mode
 
