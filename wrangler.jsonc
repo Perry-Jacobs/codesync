@@ -6,18 +6,18 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "assets": {
     "directory": ".open-next/assets",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
   },
   "services": [
     {
       "binding": "WORKER_SELF_REFERENCE",
-      "service": "codesync-web"
-    }
+      "service": "codesync-web",
+    },
   ],
   "vars": {
-    "CODE_SYNC_API_ORIGIN": "https://codesync-api.example.workers.dev"
+    "CODE_SYNC_API_ORIGIN": "https://codesync-api.sallydon164.workers.dev",
   },
   "observability": {
-    "enabled": true
-  }
+    "enabled": true,
+  },
 }
