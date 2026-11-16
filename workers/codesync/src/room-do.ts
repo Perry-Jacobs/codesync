@@ -22,6 +22,24 @@ import {
   type ServerPayloads,
 } from "./protocol";
 import { parseClientMessage } from "./validation";
+import {
+  clearAllPresence,
+  clearFilePresence,
+  clearParticipantPresence,
+  prunePresenceSnapshots,
+  type FilePresenceState,
+  updatePresenceSnapshot,
+} from "./presence-state";
+import {
+  addFileSubscription,
+  clearFileSubscriptions,
+  removeFileSubscription,
+} from "./file-subscriptions";
+import { moveWorkspacePath } from "./workspace-paths";
+import {
+  workspaceMoveConflict,
+  workspacePathConflict,
+} from "./workspace-paths";
 
 interface RoomRecord {
   id: string;
@@ -46,7 +64,6 @@ interface ParticipantRecord extends Participant {
 interface HostCredential {
   participantId: string;
   tokenHash: string;
-  consumed: boolean;
 }
 
 interface ReconnectCredential {
@@ -82,6 +99,7 @@ interface SocketAttachment {
   files: string[];
   messageCount: number;
   rateStartedAt: number;
+  presence?: FilePresenceState;
 }
 
 interface CreateRoomBody {
@@ -227,6 +245,8 @@ export class RoomDurableObject {
       return participant;
     });
     if (changed) {
+      this.clearParticipantPresence(participantId);
+      this.clearParticipantFileSubscriptions(participantId);
       if (changed.state === "WAITING") {
         await this.broadcast("waiting_room", {
           waiting: await this.waitingParticipants(),
@@ -322,7 +342,6 @@ export class RoomDurableObject {
       hostCredential: {
         participantId: hostId,
         tokenHash: hostHash,
-        consumed: false,
       },
       reconnectCredentials: {},
       pendingFs: {},
@@ -407,7 +426,7 @@ export class RoomDurableObject {
       case "cursor_move":
       case "selection_change":
       case "viewport_change":
-        await this.handlePresence(actor, message);
+        await this.handlePresence(webSocket, actor, message);
         return;
       case "request_edit":
         await this.sendPermissionRequests(actor, "edit", message.data.note);
@@ -498,18 +517,26 @@ export class RoomDurableObject {
             "This participant can no longer rejoin the session",
           );
         }
-        delete current.reconnectCredentials[reconnectHash];
+        // Reconnect tokens stay valid for their full lifetime. Consuming them
+        // on first use used to strand a tab whose replacement token was lost
+        // when the socket dropped mid-handshake (the client would retry with
+        // the already-consumed token and be locked out). Every join still
+        // rotates in a fresh token; old ones simply age out.
       } else if (
         hostHash &&
         current.hostCredential &&
-        !current.hostCredential.consumed &&
         current.hostCredential.participantId ===
           current.room.hostParticipantId &&
         safeEqual(current.hostCredential.tokenHash, hostHash)
       ) {
-        participant =
+        // The host credential is reusable for the lifetime of the room. It
+        // stays bound to the current host participant, and transfer_host
+        // rotates it, so a demoted or transferred host cannot reclaim the
+        // role with an old token. Consuming it here used to strand a host who
+        // reopened the room after losing the tab's reconnect token.
+        const candidate =
           current.participants[current.hostCredential.participantId];
-        current.hostCredential.consumed = true;
+        if (candidate?.state === "ADMITTED") participant = candidate;
       }
 
       if (participant) {
@@ -522,20 +549,44 @@ export class RoomDurableObject {
         participant.lastSeenAt = now;
         current.participants[participant.id] = participant;
         current.room.lastActivityAt = now;
-        current.reconnectCredentials[reconnectHashNew] = {
-          participantId: participant.id,
-          expiresAt: now + 15 * 60_000,
-        };
+        this.rememberReconnectToken(
+          current,
+          reconnectHashNew,
+          participant.id,
+          now,
+        );
         await txn.put(STATE_KEY, current);
         return {
           participant,
           waiting: participant.state === "WAITING",
           reconnectToken,
+          rejoined: true,
         };
       }
 
       if (current.room.status === "locked") {
         throw new RoomError("ROOM_LOCKED", "The host locked this session");
+      }
+      // A dropped participant keeps their seat briefly so a reconnect token can
+      // restore the same identity. Once that grace window has elapsed the
+      // record must not linger in the roster or hold capacity forever.
+      const staleBefore = now - 60_000;
+      for (const [staleId, stale] of Object.entries(current.participants)) {
+        if (
+          stale.id === current.room.hostParticipantId ||
+          stale.state !== "ADMITTED" ||
+          stale.socketId !== null ||
+          stale.lastSeenAt >= staleBefore
+        ) {
+          continue;
+        }
+        delete current.participants[staleId];
+        for (const [hash, credential] of Object.entries(
+          current.reconnectCredentials,
+        )) {
+          if (credential.participantId === staleId)
+            delete current.reconnectCredentials[hash];
+        }
       }
       const admitted = Object.values(current.participants).filter(
         (entry) => entry.state === "ADMITTED" && entry.socketId,
@@ -582,13 +633,20 @@ export class RoomDurableObject {
       if (waiting) current.waiting.push(participantId);
       current.room.lastActivityAt = now;
       if (!waiting) {
-        current.reconnectCredentials[reconnectHashNew] = {
+        this.rememberReconnectToken(
+          current,
+          reconnectHashNew,
           participantId,
-          expiresAt: now + 15 * 60_000,
-        };
+          now,
+        );
       }
       await txn.put(STATE_KEY, current);
-      return { participant: newParticipant, waiting, reconnectToken };
+      return {
+        participant: newParticipant,
+        waiting,
+        reconnectToken,
+        rejoined: false,
+      };
     });
 
     const attachmentUpdate = this.attachment(webSocket);
@@ -611,7 +669,7 @@ export class RoomDurableObject {
       self: toWire(outcome.participant),
     });
     await this.broadcast(
-      "participant_joined",
+      outcome.rejoined ? "participant_updated" : "participant_joined",
       { participant: toWire(outcome.participant) },
       this.socketId(webSocket),
     );
@@ -663,11 +721,14 @@ export class RoomDurableObject {
       state.room.lastActivityAt = Date.now();
       return participant;
     });
-    if (changed)
+    if (changed) {
+      this.clearParticipantPresence(participantId);
+      this.clearParticipantFileSubscriptions(participantId);
       await this.broadcast("participant_left", {
         participantId,
         reason: "left",
       });
+    }
   }
 
   private async handleChat(
@@ -722,6 +783,7 @@ export class RoomDurableObject {
   }
 
   private async handlePresence(
+    webSocket: WebSocket,
     actor: ParticipantRecord,
     message: Extract<
       ClientMessage,
@@ -729,48 +791,60 @@ export class RoomDurableObject {
     >,
   ): Promise<void> {
     if (!hasCapability(actor, "edit_code")) return;
+    const fileId = message.data.fileId;
+    const file = await this.findFile(fileId);
+    if (!file || file.kind !== "file")
+      throw new RoomError("CONFLICT", "File not found in this workspace");
+    this.subscribeFile(actor.id, fileId);
+    const update =
+      message.type === "cursor_move"
+        ? {
+            kind: "cursor" as const,
+            line: message.data.line,
+            column: message.data.column,
+            topLine: message.data.topLine,
+          }
+        : message.type === "selection_change"
+          ? { kind: "selection" as const, ranges: message.data.ranges }
+          : { kind: "viewport" as const, topLine: message.data.topLine };
+
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment = this.attachment(socket);
+      if (attachment.participantId !== actor.id) continue;
+      const presence = (attachment.presence ??= {});
+      updatePresenceSnapshot(presence, actor.id, fileId, update);
+      socket.serializeAttachment(attachment satisfies SocketAttachment);
+    }
+
+    // Exclude the sender by socket. Passing the participant id here never
+    // matched, so every editor rendered its own caret under its own name.
+    const exceptSocketId = this.socketId(webSocket);
     if (message.type === "cursor_move") {
-      const file = await this.findFile(message.data.fileId);
-      if (!file)
-        throw new RoomError("CONFLICT", "File not found in this workspace");
-      this.subscribeFile(actor.id, message.data.fileId);
       await this.broadcastFile(
         "cursor",
         {
           participantId: actor.id,
-          fileId: message.data.fileId,
+          fileId,
           line: message.data.line,
           column: message.data.column,
           topLine: message.data.topLine,
         },
-        message.data.fileId,
-        actor.id,
+        fileId,
+        exceptSocketId,
       );
     } else if (message.type === "selection_change") {
-      const file = await this.findFile(message.data.fileId);
-      if (!file)
-        throw new RoomError("CONFLICT", "File not found in this workspace");
-      this.subscribeFile(actor.id, message.data.fileId);
       await this.broadcastFile(
         "selection",
-        {
-          participantId: actor.id,
-          fileId: message.data.fileId,
-          ranges: message.data.ranges,
-        },
-        message.data.fileId,
-        actor.id,
+        { participantId: actor.id, fileId, ranges: message.data.ranges },
+        fileId,
+        exceptSocketId,
       );
     } else {
       await this.broadcastFile(
         "viewport",
-        {
-          participantId: actor.id,
-          fileId: message.data.fileId,
-          topLine: message.data.topLine,
-        },
-        message.data.fileId,
-        actor.id,
+        { participantId: actor.id, fileId, topLine: message.data.topLine },
+        fileId,
+        exceptSocketId,
       );
     }
   }
@@ -842,20 +916,11 @@ export class RoomDurableObject {
     actor: ParticipantRecord,
     data: ClientPayloads["yjs_sync_request"],
   ): Promise<void> {
-    const state = await this.readState();
-    if (
-      state?.room.workspaceMode === "local-fs" &&
-      !hasCapability(actor, "edit_code")
-    ) {
-      throw new RoomError(
-        "FORBIDDEN",
-        "The host has not granted you access to this local folder",
-      );
-    }
-    const file = await this.findFile(data.fileId);
-    if (!file || file.kind !== "file")
-      throw new RoomError("CONFLICT", "File not found");
+    // Read-only participants may open a file and follow live edits. Writes
+    // remain gated by handleYjsUpdate below.
+    const file = await this.resolveFile(data.fileId, "");
     this.subscribeFile(actor.id, file.fileId);
+    await this.replayFilePresence(webSocket, file.fileId);
     const result = (await this.documentRequest(
       file.fileId,
       "GET",
@@ -879,16 +944,8 @@ export class RoomDurableObject {
     if (!state) throw new RoomError("ROOM_NOT_FOUND", "Room no longer exists");
     if (data.op === "open") {
       const file = await this.resolveFile(data.fileId, data.path);
-      if (
-        state.room.workspaceMode === "local-fs" &&
-        !hasCapability(actor, "edit_code")
-      ) {
-        throw new RoomError(
-          "FORBIDDEN",
-          "The host has not granted you access to this local folder",
-        );
-      }
       this.subscribeFile(actor.id, file.fileId);
+      await this.replayFilePresence(webSocket, file.fileId);
       if (state.room.workspaceMode === "local-fs") {
         const response = await this.requestHost({
           op: "read",
@@ -929,11 +986,11 @@ export class RoomDurableObject {
     if (data.op === "create" || data.op === "mkdir") {
       if (state.files.length >= 600)
         throw new RoomError("CONFLICT", "Workspace file limit reached");
-      if (await this.findFileByPath(data.path)) {
-        throw new RoomError(
-          "CONFLICT",
-          `${this.fileLabel(data.path)} already exists`,
-        );
+      const createConflict = workspacePathConflict(state.files, data.path, {
+        allowImplicitDirectory: data.op === "mkdir",
+      });
+      if (createConflict) {
+        throw new RoomError("CONFLICT", createConflict);
       }
       if (state.room.workspaceMode === "local-fs") {
         const response = await this.requestHost({
@@ -964,20 +1021,19 @@ export class RoomDurableObject {
       return;
     }
 
-    const file = await this.resolveFile(data.fileId, data.path);
+    const file = await this.resolveEntry(data.fileId, data.path);
     if (data.op === "rename" || data.op === "move") {
       const toPath = data.toPath?.trim();
       if (!toPath)
         throw new RoomError("INVALID_MESSAGE", "Missing destination path");
       if (toPath === file.path) return;
-      if (file.kind === "dir" && toPath.startsWith(`${file.path}/`)) {
-        throw new RoomError("CONFLICT", "Cannot move a folder inside itself");
-      }
-      if (await this.findFileByPath(toPath))
-        throw new RoomError(
-          "CONFLICT",
-          `${this.fileLabel(toPath)} already exists`,
-        );
+      const moveConflict = workspaceMoveConflict(
+        state.files,
+        file.path,
+        toPath,
+        file.kind,
+      );
+      if (moveConflict) throw new RoomError("CONFLICT", moveConflict);
       if (state.room.workspaceMode === "local-fs") {
         const response = await this.requestHost({
           op: "rename",
@@ -994,11 +1050,9 @@ export class RoomDurableObject {
       }
       await this.updateState((current) => {
         for (const entry of current.files) {
-          if (
-            entry.path === file.path ||
-            (file.kind === "dir" && entry.path.startsWith(`${file.path}/`))
-          ) {
-            entry.path = `${toPath}${entry.path.slice(file.path.length)}`;
+          const movedPath = moveWorkspacePath(entry.path, file.path, toPath);
+          if (movedPath !== entry.path) {
+            entry.path = movedPath;
             entry.lang =
               entry.kind === "file"
                 ? languageFromPath(entry.path)
@@ -1048,6 +1102,9 @@ export class RoomDurableObject {
               (file.kind === "dir" && entry.path.startsWith(`${file.path}/`))
             ),
         );
+        for (const entry of deletedFiles) {
+          if (entry.kind === "file") this.clearFilePresence(entry.fileId);
+        }
       });
       await Promise.allSettled(
         deletedFiles
@@ -1074,12 +1131,22 @@ export class RoomDurableObject {
     }
     if (!data.connected) {
       this.clearAllFileSubscriptions();
+      this.clearAllPresence();
+      const previous = await this.listFiles();
       await this.updateState((current) => {
+        current.files = [];
         current.room.workspaceMode = "virtual";
         current.room.rootName = null;
       });
+      await Promise.allSettled(
+        previous
+          .filter((entry) => entry.kind === "file")
+          .map((entry) =>
+            this.documentRequest(entry.fileId, "DELETE", "/delete"),
+          ),
+      );
       await this.broadcast("workspace_reset", {
-        files: await this.listFiles(),
+        files: [],
         rootName: null,
         mode: "virtual",
       });
@@ -1089,6 +1156,7 @@ export class RoomDurableObject {
     // subscription before replacing the workspace so stale viewers cannot
     // receive updates from the previous or newly attached folder.
     this.clearAllFileSubscriptions();
+    this.clearAllPresence();
     const previous = await this.listFiles();
     const byPath = new Map(previous.map((entry) => [entry.path, entry]));
     const files = data.snapshot.slice(0, 600).map((entry) => ({
@@ -1329,6 +1397,8 @@ export class RoomDurableObject {
           WS_CLOSE.FORBIDDEN,
           "Removed by host",
         );
+        this.clearParticipantPresence(victim.id);
+        this.clearParticipantFileSubscriptions(victim.id);
         await this.broadcast("participant_left", {
           participantId: victim.id,
           reason: "kicked",
@@ -1456,7 +1526,6 @@ export class RoomDurableObject {
           current.hostCredential = {
             participantId: newHost.id,
             tokenHash: replacementHash,
-            consumed: false,
           };
           return true;
         });
@@ -1567,10 +1636,7 @@ export class RoomDurableObject {
       participant.screen = false;
       participant.typing = false;
       state.waiting = state.waiting.filter((id) => id !== participantId);
-      state.reconnectCredentials[hash] = {
-        participantId,
-        expiresAt: Date.now() + 15 * 60_000,
-      };
+      this.rememberReconnectToken(state, hash, participantId, Date.now());
       return participant;
     });
     if (!result)
@@ -1596,12 +1662,10 @@ export class RoomDurableObject {
     reason: string,
   ): Promise<void> {
     const next = await this.updateParticipant(participantId, patch);
-    const state = await this.readState();
-    if (
-      state?.room.workspaceMode === "local-fs" &&
-      !hasCapability(next, "edit_code")
-    ) {
-      this.clearParticipantFileSubscriptions(participantId);
+    // Losing edit access removes the live cursor, but not an already-open
+    // file: read-only participants keep following its content.
+    if (!hasCapability(next, "edit_code")) {
+      this.clearParticipantPresence(participantId);
     }
     await this.broadcast("permission_changed", {
       participantId,
@@ -1728,7 +1792,14 @@ export class RoomDurableObject {
     if (!self)
       throw new RoomError("NOT_ADMITTED", "You are not admitted to this room");
     const participants = Object.values(state.participants)
-      .filter((participant) => participant.state === "ADMITTED")
+      .filter(
+        (participant) =>
+          participant.state === "ADMITTED" &&
+          // A closed socket is not present in the room, even while its
+          // reconnect window is still open. Showing it produced duplicate
+          // people (notably a stale HOST) after a reload.
+          (participant.socketId !== null || participant.id === selfId),
+      )
       .sort((a, b) => roleOrder(a.role) - roleOrder(b.role))
       .map(toWire);
     const waiting = Object.values(state.participants)
@@ -1820,14 +1891,24 @@ export class RoomDurableObject {
     return (await this.listFiles()).find((file) => file.path === path);
   }
 
-  private async resolveFile(
+  private async resolveEntry(
     fileId: string | undefined,
     path: string,
   ): Promise<FileMeta> {
     const file = fileId
       ? await this.findFile(fileId)
       : await this.findFileByPath(path);
-    if (!file || file.kind !== "file")
+    if (!file)
+      throw new RoomError("CONFLICT", "File not found in this workspace");
+    return file;
+  }
+
+  private async resolveFile(
+    fileId: string | undefined,
+    path: string,
+  ): Promise<FileMeta> {
+    const file = await this.resolveEntry(fileId, path);
+    if (file.kind !== "file")
       throw new RoomError("CONFLICT", "File not found in this workspace");
     return file;
   }
@@ -1883,11 +1964,97 @@ export class RoomDurableObject {
     return result;
   }
 
+  private async replayFilePresence(
+    webSocket: WebSocket,
+    fileId: string,
+  ): Promise<void> {
+    const state = await this.readState();
+    const attachment = this.attachment(webSocket);
+    if (!state || !attachment.participantId) return;
+    const viewer = state.participants[attachment.participantId];
+    if (!viewer || viewer.state !== "ADMITTED") return;
+    const now = Date.now();
+    for (const peerSocket of this.ctx.getWebSockets()) {
+      const peer = this.attachment(peerSocket);
+      if (
+        !peer.participantId ||
+        peer.participantId === attachment.participantId
+      )
+        continue;
+      const participant = state.participants[peer.participantId];
+      if (
+        !participant ||
+        participant.state !== "ADMITTED" ||
+        !hasCapability(participant, "edit_code")
+      ) {
+        continue;
+      }
+      if (!peer.presence) continue;
+      const before = JSON.stringify(peer.presence);
+      prunePresenceSnapshots(peer.presence, now);
+      if (JSON.stringify(peer.presence) !== before) {
+        peerSocket.serializeAttachment(peer satisfies SocketAttachment);
+      }
+      const snapshot = peer.presence[fileId]?.[peer.participantId];
+      if (!snapshot) continue;
+      if (snapshot.cursor) {
+        this.send(webSocket, "cursor", {
+          participantId: participant.id,
+          fileId,
+          line: snapshot.cursor.line,
+          column: snapshot.cursor.column,
+          topLine: snapshot.cursor.topLine,
+        });
+      }
+      if (snapshot.selection) {
+        this.send(webSocket, "selection", {
+          participantId: participant.id,
+          fileId,
+          ranges: snapshot.selection,
+        });
+      }
+      if (snapshot.viewport !== undefined) {
+        this.send(webSocket, "viewport", {
+          participantId: participant.id,
+          fileId,
+          topLine: snapshot.viewport,
+        });
+      }
+    }
+  }
+
+  private clearParticipantPresence(participantId: string): void {
+    for (const webSocket of this.ctx.getWebSockets()) {
+      const attachment = this.attachment(webSocket);
+      if (!attachment.presence) continue;
+      clearParticipantPresence(attachment.presence, participantId);
+      webSocket.serializeAttachment(attachment satisfies SocketAttachment);
+    }
+  }
+
+  private clearFilePresence(fileId: string): void {
+    for (const webSocket of this.ctx.getWebSockets()) {
+      const attachment = this.attachment(webSocket);
+      if (attachment.presence) clearFilePresence(attachment.presence, fileId);
+      removeFileSubscription(attachment.files, fileId);
+      webSocket.serializeAttachment(attachment satisfies SocketAttachment);
+    }
+  }
+
+  private clearAllPresence(): void {
+    for (const webSocket of this.ctx.getWebSockets()) {
+      const attachment = this.attachment(webSocket);
+      if (!attachment.presence) continue;
+      clearAllPresence(attachment.presence);
+      webSocket.serializeAttachment(attachment satisfies SocketAttachment);
+    }
+  }
+
   private subscribeFile(participantId: string, fileId: string): void {
     for (const webSocket of this.ctx.getWebSockets()) {
       const attachment = this.attachment(webSocket);
       if (attachment.participantId !== participantId) continue;
-      if (!attachment.files.includes(fileId)) attachment.files.push(fileId);
+      addFileSubscription(attachment.files, fileId);
       webSocket.serializeAttachment(attachment satisfies SocketAttachment);
     }
   }
@@ -1920,17 +2087,14 @@ export class RoomDurableObject {
     fileId: string,
     exceptSocketId?: string,
   ): Promise<void> {
-    const state = await this.readState();
-    const localFilesystem = state?.room.workspaceMode === "local-fs";
     for (const webSocket of this.ctx.getWebSockets()) {
       if (exceptSocketId && this.socketId(webSocket) === exceptSocketId)
         continue;
       const attachment = this.attachment(webSocket);
+      // Subscriptions are granted only after an admitted participant opens the
+      // file. They carry live edits and presence to readers too, not just to
+      // participants with edit capability.
       if (!attachment.files.includes(fileId)) continue;
-      if (localFilesystem && attachment.participantId) {
-        const participant = state?.participants[attachment.participantId];
-        if (!participant || !hasCapability(participant, "edit_code")) continue;
-      }
       this.send(webSocket, type, data);
     }
   }
@@ -1939,7 +2103,7 @@ export class RoomDurableObject {
     for (const webSocket of this.ctx.getWebSockets()) {
       const attachment = this.attachment(webSocket);
       if (attachment.participantId !== participantId) continue;
-      attachment.files = [];
+      clearFileSubscriptions(attachment.files);
       webSocket.serializeAttachment(attachment satisfies SocketAttachment);
     }
   }
@@ -1947,7 +2111,7 @@ export class RoomDurableObject {
   private clearAllFileSubscriptions(): void {
     for (const webSocket of this.ctx.getWebSockets()) {
       const attachment = this.attachment(webSocket);
-      attachment.files = [];
+      clearFileSubscriptions(attachment.files);
       webSocket.serializeAttachment(attachment satisfies SocketAttachment);
     }
   }
@@ -2014,6 +2178,7 @@ export class RoomDurableObject {
       socketId: value?.socketId ?? "unknown",
       participantId: value?.participantId,
       files: Array.isArray(value?.files) ? value.files : [],
+      presence: value?.presence ?? {},
       messageCount: value?.messageCount ?? 0,
       rateStartedAt: value?.rateStartedAt ?? Date.now(),
     };
@@ -2053,6 +2218,33 @@ export class RoomDurableObject {
     }
   }
 
+  /**
+   * Record a fresh reconnect token without discarding the participant's
+   * previous ones. Tokens keep working until their expiry so a tab that loses
+   * the `admitted` frame mid-reconnect can retry with the token it still has.
+   * The newest few are kept and the rest age out with the 15 minute TTL.
+   */
+  private rememberReconnectToken(
+    state: DurableRoomState,
+    tokenHash: string,
+    participantId: string,
+    now: number,
+  ): void {
+    for (const [hash, credential] of Object.entries(
+      state.reconnectCredentials,
+    )) {
+      if (credential.expiresAt < now) delete state.reconnectCredentials[hash];
+    }
+    state.reconnectCredentials[tokenHash] = {
+      participantId,
+      expiresAt: now + 15 * 60_000,
+    };
+    const own = Object.entries(state.reconnectCredentials)
+      .filter(([, credential]) => credential.participantId === participantId)
+      .sort((a, b) => b[1].expiresAt - a[1].expiresAt);
+    for (const [hash] of own.slice(5)) delete state.reconnectCredentials[hash];
+  }
+
   private assignedRole(value: unknown): Role {
     return value === "CO_HOST" || value === "EDITOR" || value === "VIEWER"
       ? value
@@ -2087,10 +2279,6 @@ export class RoomDurableObject {
     return Number.isSafeInteger(parsed) && parsed > 0
       ? Math.min(parsed, 500)
       : 50;
-  }
-
-  private fileLabel(path: string): string {
-    return path.split("/").at(-1) ?? path;
   }
 }
 

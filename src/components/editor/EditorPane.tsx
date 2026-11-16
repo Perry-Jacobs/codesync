@@ -7,8 +7,10 @@ import type * as Monaco from "monaco-editor";
 import { Code2, Loader2 } from "lucide-react";
 import { hasCapability } from "@/lib/acl";
 import { presenceBus } from "@/lib/buses";
+import type { PresenceEvent } from "@/lib/presence-events";
 import type { CodeRange } from "@/lib/ws-protocol";
 import { throttle } from "@/lib/throttle";
+import { Button } from "@/components/ui/button";
 import { useSession } from "@/components/providers/session-provider";
 import { useTheme } from "@/components/providers/theme-provider";
 import {
@@ -54,6 +56,8 @@ export function EditorPane() {
   const activeFileId = useWorkspaceStore((state) => state.activeFileId);
   const self = useRoomStore((state) => state.self);
   const participants = useRoomStore((state) => state.participants);
+  const connection = useRoomStore((state) => state.connection);
+  const roomStatus = useRoomStore((state) => state.status);
   const followingId = useUiStore((state) => state.followingId);
   const setFollowing = useUiStore((state) => state.setFollowing);
 
@@ -63,25 +67,38 @@ export function EditorPane() {
   );
   const tab = tabs.find((entry) => entry.fileId === activeFileId) ?? null;
   const canEdit = hasCapability(self, "edit_code");
-  const { doc, text, synced } = useYjsFile(activeFileId);
+  const { doc, text, synced } = useYjsFile(activeFileId, canEdit);
 
   const [mounted, setMounted] = useState(false);
+  const [editRequested, setEditRequested] = useState(false);
   const [position, setPosition] = useState({ line: 1, column: 1 });
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof Monaco | null>(null);
   const managerRef = useRef<RemoteCursorManager | null>(null);
   const remoteStateRef = useRef(new Map<string, RemoteParticipantCursor>());
+  // Presence can reach the client before the participant list does. Hold those
+  // events until the author is known instead of discarding the position.
+  const pendingPresenceRef = useRef(new Map<string, PresenceEvent>());
   const followingRef = useRef<string | null>(followingId);
   followingRef.current = followingId;
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
-    editor.onDidChangeCursorPosition((event) => {
+    const positionSub = editor.onDidChangeCursorPosition((event) => {
       setPosition({
         line: event.position.lineNumber,
         column: event.position.column,
       });
+    });
+    editor.onDidDispose(() => {
+      positionSub.dispose();
+      if (editorRef.current !== editor) return;
+      editorRef.current = null;
+      monacoRef.current = null;
+      managerRef.current = null;
+      remoteStateRef.current.clear();
+      setMounted(false);
     });
     setMounted(true);
   };
@@ -98,8 +115,8 @@ export function EditorPane() {
     const manager = new RemoteCursorManager(monaco, editor);
     managerRef.current = manager;
     return () => {
-      manager.dispose();
-      managerRef.current = null;
+      if (editorRef.current === editor) manager.dispose();
+      if (managerRef.current === manager) managerRef.current = null;
     };
   }, [mounted]);
 
@@ -116,6 +133,7 @@ export function EditorPane() {
   // A new file starts with a clean cursor layer.
   useEffect(() => {
     remoteStateRef.current.clear();
+    pendingPresenceRef.current.clear();
     managerRef.current?.clear();
   }, [activeFileId]);
 
@@ -140,11 +158,24 @@ export function EditorPane() {
   // Publish local cursor, selection and viewport.
   useEffect(() => {
     const editor = editorRef.current;
-    if (!mounted || !editor || !activeFileId || !canEdit) return;
+    if (
+      !mounted ||
+      !editor ||
+      !activeFileId ||
+      !canEdit ||
+      !doc ||
+      roomStatus !== "admitted" ||
+      connection !== "open"
+    ) {
+      return;
+    }
 
-    const publishCursor = throttle((line: number, column: number) => {
-      send("cursor_move", { fileId: activeFileId, line, column });
-    }, 70);
+    const publishCursor = throttle(
+      (line: number, column: number, topLine: number) => {
+        send("cursor_move", { fileId: activeFileId, line, column, topLine });
+      },
+      70,
+    );
     const publishSelection = throttle((ranges: CodeRange[]) => {
       send("selection_change", { fileId: activeFileId, ranges });
     }, 140);
@@ -152,12 +183,35 @@ export function EditorPane() {
       send("viewport_change", { fileId: activeFileId, topLine });
     }, 300);
 
+    const positionSub = editor.onDidChangeCursorPosition((event) => {
+      const topLine = (editor.getVisibleRanges()[0]?.startLineNumber ?? 1) - 1;
+      publishCursor(
+        event.position.lineNumber - 1,
+        event.position.column - 1,
+        topLine,
+      );
+    });
     const selectionSub = editor.onDidChangeCursorSelection((event) => {
-      const head = event.selection.getPosition();
-      publishCursor(head.lineNumber - 1, head.column - 1);
       publishSelection(
         event.selection.isEmpty() ? [] : [toWireRange(event.selection)],
       );
+    });
+    const publishCurrentState = (): void => {
+      const position = editor.getPosition();
+      const topLine = (editor.getVisibleRanges()[0]?.startLineNumber ?? 1) - 1;
+      if (position) {
+        publishCursor(position.lineNumber - 1, position.column - 1, topLine);
+      }
+      const selection = editor.getSelection();
+      publishSelection(
+        selection && !selection.isEmpty() ? [toWireRange(selection)] : [],
+      );
+      publishViewport(topLine);
+    };
+    let publishFrame = window.requestAnimationFrame(publishCurrentState);
+    const modelSub = editor.onDidChangeModel(() => {
+      window.cancelAnimationFrame(publishFrame);
+      publishFrame = window.requestAnimationFrame(publishCurrentState);
     });
     const scrollSub = editor.onDidScrollChange((event) => {
       if (!event.scrollTopChanged) return;
@@ -166,13 +220,16 @@ export function EditorPane() {
     });
 
     return () => {
+      window.cancelAnimationFrame(publishFrame);
+      modelSub.dispose();
       publishCursor.cancel();
       publishSelection.cancel();
       publishViewport.cancel();
+      positionSub.dispose();
       selectionSub.dispose();
       scrollSub.dispose();
     };
-  }, [mounted, activeFileId, canEdit, send]);
+  }, [mounted, activeFileId, canEdit, connection, roomStatus, doc, send]);
 
   // Apply remote presence.
   useEffect(() => {
@@ -180,12 +237,34 @@ export function EditorPane() {
     const editor = editorRef.current;
     if (!mounted || !editor || !manager || !activeFileId) return;
 
-    return presenceBus.on((event) => {
-      if (event.fileId !== activeFileId) return;
+    const apply = (event: PresenceEvent): boolean => {
+      if (event.kind === "clear-all") {
+        remoteStateRef.current.clear();
+        pendingPresenceRef.current.clear();
+        manager.clear();
+        return true;
+      }
+      if (event.kind === "clear-participant") {
+        for (const [key, pending] of pendingPresenceRef.current) {
+          if (
+            pending.kind !== "clear-all" &&
+            pending.kind !== "clear-participant" &&
+            pending.participantId === event.participantId
+          ) {
+            pendingPresenceRef.current.delete(key);
+          }
+        }
+        remoteStateRef.current.delete(event.participantId);
+        manager.remove(event.participantId);
+        return true;
+      }
+      if (event.fileId !== activeFileId) return true;
       const participant = participants.find(
         (entry) => entry.id === event.participantId,
       );
-      if (!participant || !hasCapability(participant, "edit_code")) return;
+      // Keep the event: the participant list may still be in flight.
+      if (!participant) return false;
+      if (!hasCapability(participant, "edit_code")) return true;
 
       const existing = remoteStateRef.current.get(participant.id) ?? {
         participantId: participant.id,
@@ -209,7 +288,7 @@ export function EditorPane() {
         if (followingRef.current === participant.id) {
           editor.revealLineNearTop(Math.max(1, event.topLine + 1));
         }
-        return;
+        return true;
       }
 
       remoteStateRef.current.set(participant.id, next);
@@ -217,6 +296,22 @@ export function EditorPane() {
 
       if (event.kind === "cursor" && followingRef.current === participant.id) {
         editor.revealLineInCenterIfOutsideViewport(Math.max(1, event.line + 1));
+      }
+      return true;
+    };
+
+    // Drain events that were held while the participant list was in flight.
+    for (const [key, event] of [...pendingPresenceRef.current]) {
+      if (apply(event)) pendingPresenceRef.current.delete(key);
+    }
+
+    return presenceBus.on((event) => {
+      // Hold the event until its author is known rather than dropping it.
+      if (!apply(event) && "fileId" in event) {
+        pendingPresenceRef.current.set(
+          `${event.participantId}:${event.fileId}:${event.kind}`,
+          event,
+        );
       }
     });
   }, [mounted, activeFileId, participants]);
@@ -234,6 +329,11 @@ export function EditorPane() {
       editorRef.current?.revealLineInCenterIfOutsideViewport(cursor.line + 1);
   }, [followingId, participants, setFollowing]);
 
+  const requestEdit = (): void => {
+    send("request_edit", { note: "Can I help edit?" });
+    setEditRequested(true);
+  };
+
   if (!file || !tab) {
     return (
       <div className="flex h-full flex-col items-center justify-center bg-card px-5 text-center">
@@ -247,8 +347,20 @@ export function EditorPane() {
           <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
             {canEdit
               ? "Pick a file from the explorer, or create one to start collaborating."
-              : "Ask the host for edit access, or open a file from the explorer to read along."}
+              : "Pick a file from the explorer to read along, or ask the host for edit access."}
           </p>
+          {!canEdit ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-4"
+              onClick={requestEdit}
+              disabled={editRequested}
+            >
+              {editRequested ? "Request sent" : "Request edit"}
+            </Button>
+          ) : null}
         </div>
       </div>
     );
@@ -262,6 +374,11 @@ export function EditorPane() {
           path={file.path}
           defaultLanguage={file.lang}
           defaultValue=""
+          // Monaco throws an uncatchable `Canceled: Canceled` rejection when a
+          // tab switch disposes the previous model while its view state is
+          // being restored. The app doesn't rely on per-tab scroll restoration,
+          // so skip the library's save/restore path entirely.
+          saveViewState={false}
           theme={theme === "dark" ? EDITOR_THEME.dark : EDITOR_THEME.light}
           beforeMount={handleBeforeMount}
           onMount={handleMount}

@@ -172,8 +172,14 @@ export class RemoteCursorManager {
           Math.max(startLine, range.endLine + 1),
           lineCount,
         );
-        const startColumn = Math.max(1, range.startColumn + 1);
-        const endColumn = Math.max(1, range.endColumn + 1);
+        const startColumn = Math.min(
+          Math.max(1, range.startColumn + 1),
+          model?.getLineMaxColumn(startLine) ?? 1,
+        );
+        const endColumn = Math.min(
+          Math.max(1, range.endColumn + 1),
+          model?.getLineMaxColumn(endLine) ?? 1,
+        );
         if (startLine === endLine && startColumn === endColumn) continue;
         decorations.push({
           range: new this.monaco.Range(

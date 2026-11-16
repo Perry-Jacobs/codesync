@@ -29,13 +29,13 @@ import {
 import { WsError } from "../../errors";
 import { createLogger } from "../../logger";
 import {
-  clearParticipantFileSubscriptions,
   closeRoomSockets,
   emit,
   findSocket,
   refreshSocketParticipant,
   sendToParticipant,
 } from "../broadcast";
+import { clearParticipant } from "../presence-store";
 import { buildRoomState, notifyWaiting } from "../state";
 import type { SocketContext } from "../connection";
 import { flushAll, clearRoomDocs } from "../../yjs/store";
@@ -89,6 +89,7 @@ async function persistGrant(
   const next = await updateParticipant(roomId, target.id, patch);
   if (!next) throw new WsError("CONFLICT", "Participant no longer exists");
   refreshSocketParticipant(roomId, next);
+  if (!hasCapability(next, "edit_code")) clearParticipant(roomId, next.id);
   emit(roomId, "permission_changed", {
     participantId: next.id,
     role: next.role,
@@ -183,6 +184,8 @@ async function kickParticipant(
     typing: false,
   });
   if (!next) throw new WsError("CONFLICT", "Participant no longer exists");
+  // A removed participant keeps no cursor behind for the people still editing.
+  clearParticipant(room.id, target.id);
   if (target.socketId) {
     const socket = findSocket(room.id, target.socketId);
     if (socket) {
@@ -293,18 +296,14 @@ export async function handleHostAction(
       }
       if (!canAssignRole(actor, role))
         throw new WsError("FORBIDDEN", "Role change not permitted");
-      const next = await persistGrant(
+      await persistGrant(
         room.id,
         victim,
         { role, ...defaultsForRole(role) },
         `role:${role}`,
       );
-      if (
-        room.workspaceMode === "local-fs" &&
-        !hasCapability(next, "edit_code")
-      ) {
-        clearParticipantFileSubscriptions(room.id, victim.id);
-      }
+      // Read-only participants keep an already-open file. Losing edit access
+      // clears their cursor, not the content they are following.
       break;
     }
     case "grant_edit":
@@ -319,9 +318,6 @@ export async function handleHostAction(
         { canEdit },
         canEdit ? "granted_edit" : "revoked_edit",
       );
-      if (room.workspaceMode === "local-fs" && !canEdit) {
-        clearParticipantFileSubscriptions(room.id, victim.id);
-      }
       break;
     }
     case "grant_speak":

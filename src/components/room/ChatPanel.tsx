@@ -21,7 +21,9 @@ export function ChatPanel({ variant = "desktop" }: ChatPanelProps) {
   const chat = useRoomStore((state) => state.chat);
   const self = useRoomStore((state) => state.self);
   const clearUnread = useUiStore((state) => state.clearUnread);
-  const chatVisible = useUiStore((state) => state.sidePanelTab === "chat");
+  const chatVisible = useUiStore(
+    (state) => state.sidePanelTab === "chat" && state.railVisible,
+  );
   const [body, setBody] = useState("");
   const [showReactions, setShowReactions] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
@@ -32,9 +34,15 @@ export function ChatPanel({ variant = "desktop" }: ChatPanelProps) {
     null,
   );
   const canChat = hasCapability(self, "chat");
+  // ChatPanel can stay mounted behind a closed compact drawer. Reopening the
+  // rail must not erase the badge for messages that arrived while it was
+  // hidden, so only clear when the message list grows while chat is on screen.
+  const knownLength = useRef(chat.length);
 
   useEffect(() => {
-    if (chatVisible && nearBottom) clearUnread();
+    const grew = chat.length > knownLength.current;
+    knownLength.current = chat.length;
+    if (grew && chatVisible && nearBottom) clearUnread();
   }, [chat.length, chatVisible, clearUnread, nearBottom]);
 
   useEffect(() => {

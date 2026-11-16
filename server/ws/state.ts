@@ -1,19 +1,18 @@
-import { hasCapability, ROLE_ORDER } from '@/lib/acl';
+import { hasCapability, ROLE_ORDER } from "@/lib/acl";
 import type {
   Participant,
   RoomSnapshot,
   ServerPayloads,
-} from '@/lib/ws-protocol';
+} from "@/lib/ws-protocol";
 import {
-  isParticipantPresent,
   listChat,
   listFiles,
   listParticipants,
   listWaiting,
-} from '../rooms/repository';
-import type { ParticipantRecord, RoomRecord } from '../rooms/types';
-import { toWireParticipant } from '../rooms/types';
-import { sendToParticipant } from './broadcast';
+} from "../rooms/repository";
+import type { ParticipantRecord, RoomRecord } from "../rooms/types";
+import { toWireParticipant } from "../rooms/types";
+import { sendToParticipant } from "./broadcast";
 
 export function toRoomSnapshot(room: RoomRecord): RoomSnapshot {
   return {
@@ -32,19 +31,17 @@ export function toRoomSnapshot(room: RoomRecord): RoomSnapshot {
 }
 
 function sortParticipants(records: ParticipantRecord[]): Participant[] {
-  return records
-    .map(toWireParticipant)
-    .sort((a, b) => {
-      const roleDelta = ROLE_ORDER[a.role] - ROLE_ORDER[b.role];
-      return roleDelta !== 0 ? roleDelta : a.joinedAt - b.joinedAt;
-    });
+  return records.map(toWireParticipant).sort((a, b) => {
+    const roleDelta = ROLE_ORDER[a.role] - ROLE_ORDER[b.role];
+    return roleDelta !== 0 ? roleDelta : a.joinedAt - b.joinedAt;
+  });
 }
 
 export async function buildRoomState(
   room: RoomRecord,
   self: ParticipantRecord,
-): Promise<ServerPayloads['room_state']> {
-  const base: ServerPayloads['room_state'] = {
+): Promise<ServerPayloads["room_state"]> {
+  const base: ServerPayloads["room_state"] = {
     room: toRoomSnapshot(room),
     self: toWireParticipant(self),
     participants: [],
@@ -54,7 +51,7 @@ export async function buildRoomState(
     serverTime: Date.now(),
   };
 
-  if (self.state !== 'ADMITTED') return base;
+  if (self.state !== "ADMITTED") return base;
 
   const [participants, files, chat] = await Promise.all([
     listParticipants(room.id),
@@ -62,14 +59,19 @@ export async function buildRoomState(
     listChat(room.id),
   ]);
 
-  const waiting =
-    hasCapability(self, 'admit') ? await listWaiting(room.id) : [];
+  const waiting = hasCapability(self, "admit")
+    ? await listWaiting(room.id)
+    : [];
 
   return {
     ...base,
     participants: sortParticipants(
       participants.filter(
-        (participant) => isParticipantPresent(participant) || participant.id === self.id,
+        // Only live sockets belong in the roster. A dropped participant keeps
+        // their record briefly so a reconnect restores the same identity, but
+        // showing that record produced duplicate (often HOST) entries.
+        (participant) =>
+          participant.socketId !== null || participant.id === self.id,
       ),
     ),
     files,
@@ -86,12 +88,12 @@ export async function notifyWaiting(roomId: string): Promise<void> {
   ]);
   const payload = { waiting: waiting.map(toWireParticipant) };
   for (const participant of participants) {
-    if (participant.state !== 'ADMITTED') continue;
-    if (!hasCapability(participant, 'admit')) continue;
-    sendToParticipant(roomId, participant.id, 'waiting_room', payload);
+    if (participant.state !== "ADMITTED") continue;
+    if (!hasCapability(participant, "admit")) continue;
+    sendToParticipant(roomId, participant.id, "waiting_room", payload);
   }
 }
 
 export function canSeeWaiting(participant: ParticipantRecord): boolean {
-  return hasCapability(participant, 'admit');
+  return hasCapability(participant, "admit");
 }

@@ -73,7 +73,7 @@ export function VideoTile({
       ) : null}
       <div className="absolute inset-x-0 bottom-0 flex items-center gap-1 bg-gradient-to-t from-black/80 to-transparent px-1.5 py-1">
         <span className="truncate text-[9px] font-medium text-white/90">
-          {isSelf ? "You" : name}
+          {isSelf ? (screenSharing ? "You — screen" : "You") : name}
         </span>
         {!micOn ? (
           <MicOff className="h-2.5 w-2.5 shrink-0 text-rose-400" />

@@ -132,6 +132,7 @@ async function createRoom() {
 async function clickButton(page, description, expression) {
   const target = await page.evaluate(`(() => {
     const matches = [...document.querySelectorAll('button')].filter((button) => {
+      if (button.disabled || button.getClientRects().length === 0) return false;
       const text = (button.textContent || '').trim();
       const aria = button.getAttribute('aria-label') || '';
       return ${expression};
@@ -172,7 +173,10 @@ async function createFiles(page) {
       `(button.innerHTML || '').includes('lucide-plus')`,
     );
     await page.evaluate(`(() => {
-      const input = document.querySelector('#entry-name');
+      const dialog = [...document.querySelectorAll('[role="dialog"]')].find(
+        (node) => node.getClientRects().length > 0,
+      );
+      const input = dialog?.querySelector('input');
       if (!input) return false;
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
       setter.call(input, ${JSON.stringify(name)});
@@ -182,7 +186,7 @@ async function createFiles(page) {
     await clickButton(
       page,
       "Create",
-      `(button.textContent || '').trim() === 'Create'`,
+      `[...document.querySelectorAll('[role="dialog"]')].some((dialog) => dialog.contains(button)) && (button.textContent || '').trim() === 'Create'`,
     );
     await sleep(120);
   }
@@ -309,7 +313,7 @@ async function main() {
     report.screenshots.push(await page.screenshot("codesync-landing-delayed"));
 
     await page.navigate(`${APP}/room/${room.roomKey}`);
-    await sleep(1600);
+    await sleep(4500);
     await setMobile(page, 390, 844);
     report.screenshots.push(await page.screenshot("codesync-room-host-mobile"));
     await clickButton(
@@ -317,7 +321,15 @@ async function main() {
       "mobile people panel",
       `(button.getAttribute('aria-label') || '') === 'Toggle people and chat'`,
     );
-    await sleep(350);
+    await sleep(600);
+    report.checks.mobilePeopleDrawer = await page.evaluate(`(() => {
+      const dialog = [...document.querySelectorAll('[role="dialog"]')].find(
+        (node) => node.getClientRects().length > 0 && node.innerText.includes('PEOPLE'),
+      );
+      if (!dialog) return false;
+      const rect = dialog.getBoundingClientRect();
+      return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+    })()`);
     report.screenshots.push(
       await page.screenshot("codesync-room-mobile-people"),
     );

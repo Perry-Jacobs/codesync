@@ -164,18 +164,24 @@ async function main() {
       return true;
     })()`);
     await sleep(500);
-    const guestClickState = await guestPage.evaluate(`(() => {
-      const button = [...document.querySelectorAll('button')].find(
-        (candidate) => (candidate.textContent || '').trim() === 'Join session',
-      );
-      const state = {
-        found: Boolean(button),
-        disabled: button?.disabled ?? true,
-        inputValue: document.querySelector('#display-name')?.value ?? null,
-      };
-      if (button && !button.disabled) button.click();
-      return state;
-    })()`);
+    const deadline = Date.now() + 15_000;
+    let guestClickState = null;
+    while (Date.now() < deadline) {
+      guestClickState = await guestPage.evaluate(`(() => {
+        const button = [...document.querySelectorAll('button')].find(
+          (candidate) => (candidate.textContent || '').trim() === 'Join session',
+        );
+        const state = {
+          found: Boolean(button),
+          disabled: button?.disabled ?? true,
+          inputValue: document.querySelector('#display-name')?.value ?? null,
+        };
+        if (button && !button.disabled) button.click();
+        return state;
+      })()`);
+      if (guestClickState.found && !guestClickState.disabled) break;
+      await sleep(300);
+    }
     const guestClicked = guestClickState.found && !guestClickState.disabled;
     const guestToasts = await observeToasts(guestPage);
     const guestRoomVisible = await guestPage.evaluate(

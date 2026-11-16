@@ -1,12 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { useSession } from "@/components/providers/session-provider";
-import { webrtcBus } from "@/lib/buses";
+import { peerResetBus, webrtcBus } from "@/lib/buses";
 import { PeerMesh } from "@/lib/webrtc/peerMesh";
 import { canScreenShare } from "@/lib/acl";
 import { apiUrl } from "@/lib/api-client";
+import type { ServerPayloads } from "@/lib/ws-protocol";
 import { useMediaStore, type PeerConnectionState } from "@/stores/media.store";
 import { useRoomStore } from "@/stores/room.store";
 
@@ -50,6 +58,7 @@ export function useWebRTC(): WebRtcApi {
   const { send } = useSession();
   const self = useRoomStore((state) => state.self);
   const room = useRoomStore((state) => state.room);
+  const status = useRoomStore((state) => state.status);
   const participants = useRoomStore((state) => state.participants);
   const micEnabled = useMediaStore((state) => state.micEnabled);
   const camEnabled = useMediaStore((state) => state.camEnabled);
@@ -58,11 +67,22 @@ export function useWebRTC(): WebRtcApi {
   const localStream = useMediaStore((state) => state.localStream);
 
   const [iceServers, setIceServers] = useState<RTCIceServer[] | null>(null);
+  // The preview stream is mutated in place when tracks are added or removed,
+  // and Chrome does not emit `addtrack` for MediaStream here. Bump this so
+  // consumers (the video dock's fullscreen availability, for one) re-render
+  // when the camera track actually changes.
+  const [, bumpMediaRevision] = useReducer(
+    (revision: number) => revision + 1,
+    0,
+  );
   const meshRef = useRef<PeerMesh | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioRef = useRef<MediaStreamTrack | null>(null);
   const camRef = useRef<MediaStreamTrack | null>(null);
   const screenRef = useRef<MediaStreamTrack | null>(null);
+  const screenRequestRef = useRef(0);
+  const screenCapturePendingRef = useRef(false);
+  const pendingSignalsRef = useRef<Array<ServerPayloads["webrtc_signal"]>>([]);
   const selfId = self?.id ?? null;
 
   const canShareScreen = useMemo(
@@ -110,7 +130,10 @@ export function useWebRTC(): WebRtcApi {
 
   // Mesh lifecycle.
   useEffect(() => {
-    if (!selfId || !iceServers) return;
+    // `room_state` contains the participant IDs before the server's
+    // authoritative `admitted` message arrives. Starting the mesh at that
+    // point can emit an offer while the socket still rejects non-chat frames.
+    if (!selfId || !iceServers || status !== "admitted") return;
     const mesh = new PeerMesh({
       iceServers,
       selfId,
@@ -122,12 +145,20 @@ export function useWebRTC(): WebRtcApi {
         useMediaStore
           .getState()
           .setPeerState(participantId, mapPeerState(state)),
-      onError: (message) => toast.error(message),
+      onError: (message) => {
+        console.error("[codesync] WebRTC error", message);
+        toast.error(message);
+      },
     });
     meshRef.current = mesh;
     if (audioRef.current) void mesh.setAudioTrack(audioRef.current);
     const video = screenRef.current ?? camRef.current;
     if (video) void mesh.setVideoTrack(video);
+
+    const pendingSignals = pendingSignalsRef.current.splice(0);
+    for (const payload of pendingSignals) {
+      void mesh.handleSignal(payload.fromId, payload.signal);
+    }
 
     const current = useRoomStore.getState().participants;
     for (const participant of current) {
@@ -144,7 +175,7 @@ export function useWebRTC(): WebRtcApi {
       mesh.closeAll();
       meshRef.current = null;
     };
-  }, [iceServers, selfId, send]);
+  }, [iceServers, selfId, send, status]);
 
   // Keep peers aligned with the admitted participant list.
   useEffect(() => {
@@ -163,10 +194,23 @@ export function useWebRTC(): WebRtcApi {
     }
   }, [participants, selfId]);
 
-  // Incoming signals.
+  // Signals and transient disconnect events can arrive before the room route
+  // mounts or the ICE config finishes loading. Keep only events missed while
+  // there is no mesh; the buses deliver their short buffer once when ready.
+  useEffect(() => {
+    return peerResetBus.on((participantId) => {
+      meshRef.current?.removePeer(participantId);
+    });
+  }, []);
+
   useEffect(() => {
     return webrtcBus.on((payload) => {
-      void meshRef.current?.handleSignal(payload.fromId, payload.signal);
+      const mesh = meshRef.current;
+      if (!mesh) {
+        pendingSignalsRef.current.push(payload);
+        return;
+      }
+      void mesh.handleSignal(payload.fromId, payload.signal);
     });
   }, []);
 
@@ -251,7 +295,11 @@ export function useWebRTC(): WebRtcApi {
           }
           camRef.current = track;
           stream?.addTrack(track);
-          track.onended = () => useMediaStore.getState().setCamEnabled(false);
+          bumpMediaRevision();
+          track.onended = () => {
+            useMediaStore.getState().setCamEnabled(false);
+            bumpMediaRevision();
+          };
           if (!screenRef.current) void meshRef.current?.setVideoTrack(track);
           useMediaStore.getState().setPermissionError(null);
         })
@@ -267,6 +315,7 @@ export function useWebRTC(): WebRtcApi {
       camRef.current = null;
       track.stop();
       if (stream?.getTracks().includes(track)) stream.removeTrack(track);
+      bumpMediaRevision();
       if (!screenRef.current) void meshRef.current?.setVideoTrack(null);
     }
     return () => {
@@ -274,50 +323,38 @@ export function useWebRTC(): WebRtcApi {
     };
   }, [camEnabled]);
 
-  // Screen share.
-  useEffect(() => {
-    let cancelled = false;
-    if (screenSharing && !screenRef.current) {
-      if (!navigator.mediaDevices?.getDisplayMedia) {
-        useMediaStore.getState().setScreenSharing(false);
-        useMediaStore
-          .getState()
-          .setPermissionError(
-            "Screen sharing is not available in this browser",
-          );
-        return;
-      }
-      void navigator.mediaDevices
-        .getDisplayMedia({ video: { frameRate: { ideal: 30 } }, audio: false })
-        .then((media) => {
-          const track = media.getVideoTracks()[0];
-          if (!track) return;
-          if (cancelled) {
-            track.stop();
-            return;
-          }
-          screenRef.current = track;
-          useMediaStore.getState().setScreenStream(new MediaStream([track]));
-          track.onended = () =>
-            useMediaStore.getState().setScreenSharing(false);
-          void meshRef.current?.setVideoTrack(track);
-        })
-        .catch(() => {
-          useMediaStore.getState().setScreenSharing(false);
-          useMediaStore.getState().setScreenStream(null);
-          toast.error("Screen share was cancelled");
-        });
-    } else if (!screenSharing && screenRef.current) {
-      const track = screenRef.current;
-      screenRef.current = null;
+  const stopScreenShare = useCallback(() => {
+    screenRequestRef.current += 1;
+    screenCapturePendingRef.current = false;
+    const track = screenRef.current;
+    screenRef.current = null;
+    if (track) {
+      track.onended = null;
+      track.onunmute = null;
+      track.onmute = null;
       track.stop();
-      useMediaStore.getState().setScreenStream(null);
-      void meshRef.current?.setVideoTrack(camRef.current);
     }
-    return () => {
-      cancelled = true;
-    };
-  }, [screenSharing]);
+    useMediaStore.getState().setScreenStream(null);
+    useMediaStore.getState().setScreenSharing(false);
+    void meshRef.current?.setVideoTrack(camRef.current);
+  }, []);
+
+  // A host can revoke guest sharing mid-stream. Stop local capture so the
+  // setting takes effect immediately instead of leaving an active, unstoppable
+  // screen track behind a disabled button.
+  useEffect(() => {
+    if (canShareScreen || !screenRef.current) return;
+    stopScreenShare();
+    toast.info("The host turned off guest screen sharing");
+  }, [canShareScreen, stopScreenShare]);
+
+  useEffect(
+    () => () => {
+      screenRequestRef.current += 1;
+      screenCapturePendingRef.current = false;
+    },
+    [],
+  );
 
   // Publish device state so the server can render badges and enforce grants.
   useEffect(() => {
@@ -364,14 +401,76 @@ export function useWebRTC(): WebRtcApi {
   }, []);
 
   const toggleScreen = useCallback(async () => {
+    // Stopping must always be possible, even after the host revokes the
+    // permission that allowed the share to start.
+    if (screenRef.current) {
+      stopScreenShare();
+      return;
+    }
     if (!canShareScreen) {
       toast.error("Screen sharing is limited to the host and co-hosts");
       return;
     }
-    useMediaStore
-      .getState()
-      .setScreenSharing(!useMediaStore.getState().screenSharing);
-  }, [canShareScreen]);
+
+    if (screenCapturePendingRef.current) return;
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      useMediaStore
+        .getState()
+        .setPermissionError("Screen sharing is not available in this browser");
+      toast.error("Screen sharing is not available in this browser");
+      return;
+    }
+
+    const requestId = ++screenRequestRef.current;
+    screenCapturePendingRef.current = true;
+    try {
+      // Call capture from the user gesture itself. Starting it from an effect
+      // can lose transient browser activation, especially for app/window picks.
+      const media = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
+          frameRate: { ideal: 15, max: 15 },
+        },
+        audio: false,
+      });
+      const track = media.getVideoTracks()[0];
+      if (!track) throw new Error("The selected source did not provide video");
+      if (requestId !== screenRequestRef.current) {
+        track.stop();
+        return;
+      }
+
+      screenRef.current = track;
+      // Screen content is usually text and UI; tell WebRTC to favour detail
+      // over motion so code stays legible at the capped frame rate.
+      track.contentHint = "detail";
+      track.onended = () => {
+        if (screenRef.current !== track) return;
+        stopScreenShare();
+      };
+      track.onunmute = bumpMediaRevision;
+      track.onmute = bumpMediaRevision;
+      useMediaStore.getState().setScreenStream(new MediaStream([track]));
+      useMediaStore.getState().setScreenSharing(true);
+      useMediaStore.getState().setPermissionError(null);
+      await meshRef.current?.setVideoTrack(track);
+    } catch (error) {
+      if (requestId === screenRequestRef.current) {
+        const message =
+          error instanceof DOMException && error.name === "NotAllowedError"
+            ? "Screen sharing was cancelled or not allowed"
+            : error instanceof Error
+              ? error.message
+              : "Could not share this screen";
+        toast.error(message);
+      }
+    } finally {
+      if (requestId === screenRequestRef.current) {
+        screenCapturePendingRef.current = false;
+      }
+    }
+  }, [canShareScreen, stopScreenShare]);
 
   return {
     localStream,

@@ -9,9 +9,17 @@ import { getRedis, getSubscriber, keys } from "@/lib/redis";
 import type { SocketContext } from "./connection";
 import type { ParticipantRecord } from "../rooms/types";
 import { hasCapability } from "@/lib/acl";
+import { applyRemoteRoomMessage } from "./remote-presence";
 import { createLogger } from "../logger";
 import { applyUpdate, releaseDoc } from "../yjs/store";
 import { handleFsBusPayload, type FsBusPayload } from "../fs/pending";
+
+import {
+  addFileSubscription as addSubscription,
+  clearFileSubscriptions as clearSubscriptions,
+  removeFileSubscription as removeSubscription,
+  removeSocketSubscriptions,
+} from "./file-subscriptions";
 
 const log = createLogger({ scope: "bus" });
 const INSTANCE_ID = `i_${nanoid(10)}`;
@@ -57,16 +65,15 @@ export function registerSocket(ctx: SocketContext): void {
 }
 
 function releaseSocketSubscriptions(roomId: string, socketId: string): void {
-  const files = fileSubscriptions.get(roomId);
-  if (!files) return;
-  for (const [fileId, subscribers] of files) {
-    if (!subscribers.delete(socketId)) continue;
+  for (const fileId of removeSocketSubscriptions(
+    fileSubscriptions,
+    roomId,
+    socketId,
+  )) {
     // Each socket owns one document reference. Release it even when other
     // subscribers remain connected.
     releaseDoc(roomId, fileId, socketId);
-    if (subscribers.size === 0) files.delete(fileId);
   }
-  if (files.size === 0) fileSubscriptions.delete(roomId);
 }
 
 export function unregisterSocket(ctx: SocketContext): void {
@@ -122,29 +129,25 @@ export function closeRoomSockets(
   fileSubscriptions.delete(roomId);
 }
 
-export function subscribeFile(ctx: SocketContext, fileId: string): void {
-  if (!ctx.roomId) return;
-  let files = fileSubscriptions.get(ctx.roomId);
-  if (!files) {
-    files = new Map();
-    fileSubscriptions.set(ctx.roomId, files);
-  }
-  let subscribers = files.get(fileId);
-  if (!subscribers) {
-    subscribers = new Set();
-    files.set(fileId, subscribers);
-  }
-  subscribers.add(ctx.id);
+export function subscribeFile(ctx: SocketContext, fileId: string): boolean {
+  if (!ctx.roomId) return false;
+  return addSubscription(fileSubscriptions, ctx.roomId, fileId, ctx.id);
 }
 
 export function unsubscribeFile(ctx: SocketContext, fileId: string): void {
   if (!ctx.roomId) return;
-  const subscribers = fileSubscriptions.get(ctx.roomId)?.get(fileId);
-  if (!subscribers) return;
-  if (!subscribers.delete(ctx.id)) return;
-  releaseDoc(ctx.roomId, fileId, ctx.id);
-  if (subscribers.size === 0) {
-    fileSubscriptions.get(ctx.roomId)?.delete(fileId);
+  if (removeSubscription(fileSubscriptions, ctx.roomId, fileId, ctx.id)) {
+    releaseDoc(ctx.roomId, fileId, ctx.id);
+  }
+}
+
+export function clearFileSubscriptions(roomId: string, fileId: string): void {
+  for (const socketId of clearSubscriptions(
+    fileSubscriptions,
+    roomId,
+    fileId,
+  )) {
+    releaseDoc(roomId, fileId, socketId);
   }
 }
 
@@ -296,6 +299,17 @@ export async function initBus(): Promise<void> {
         if (payload.origin === INSTANCE_ID) return;
         if (!payload.roomId || !payload.message) return;
         messageRoom.set(payload.message, payload.roomId);
+        const cleanup = applyRemoteRoomMessage(
+          payload.roomId,
+          payload.message,
+          roomSockets.get(payload.roomId)?.values() ?? [],
+        );
+        if (cleanup.clearFileSubscriptions && cleanup.participantIdToClear) {
+          clearParticipantFileSubscriptions(
+            payload.roomId,
+            cleanup.participantIdToClear,
+          );
+        }
         // Keep this gateway's server-side Yjs document current when another
         // gateway accepts an edit. The same CRDT update is also forwarded to
         // subscribed browsers, but read-only clients may never echo it back.

@@ -71,7 +71,38 @@ export class RoomSocketClient {
     this.credentials = { ...this.credentials, ...patch };
   }
 
+  /**
+   * Retries the join handshake with corrected credentials on the existing
+   * socket. Used when a stale reconnect token is rejected but the tab still
+   * holds a host credential that can reclaim the session.
+   */
+  retryJoin(patch: Partial<JoinCredentials>): boolean {
+    if (!this.credentials) return false;
+    this.credentials = { ...this.credentials, ...patch };
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.admitted = false;
+      this.sendJoin();
+      return true;
+    }
+    if (this.manualClose) return false;
+    this.reconnectNow();
+    return true;
+  }
+
   disconnect(): void {
+    this.manualClose = true;
+    this.clearTimers();
+    this.closeSocket();
+    this.queued = [];
+    this.setStatus("idle");
+  }
+
+  /**
+   * End the socket without clearing the session. Used when the server says the
+   * room is over so the UI can keep rendering its closed state instead of
+   * reconnecting in a loop and replaying the same error toast.
+   */
+  stopReconnecting(): void {
     this.manualClose = true;
     this.clearTimers();
     this.closeSocket();

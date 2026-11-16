@@ -69,6 +69,29 @@ This mode is intended for testing UI and application changes without deploying t
 
 Local changes remain on your machine until they are reviewed, committed, and pushed. Pushing to `main` runs the GitHub Actions workflows that deploy the frontend and API Workers.
 
+### Run the local frontend as a background service
+
+The repository includes a user-level systemd unit at `.config/systemd/user/codesync-web.service`. It keeps `http://localhost:3000` available without a terminal and restarts the frontend automatically if it exits.
+
+Before linking it, check the `WorkingDirectory`, `PATH`, and `ExecStart` paths in the unit. They currently expect the repository at `~/Desktop/Tech Stack` and Node.js at `~/.nvm/versions/node/v26.13.0/bin`; update them if your setup differs.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user link "$PWD/.config/systemd/user/codesync-web.service"
+systemctl --user enable --now codesync-web.service
+```
+
+Useful commands:
+
+```bash
+systemctl --user status codesync-web.service
+systemctl --user restart codesync-web.service
+systemctl --user stop codesync-web.service
+journalctl --user -u codesync-web.service -f
+```
+
+User lingering is enabled so the service can start after a reboot without an interactive login. Do not run `npm run dev:web` while the service is active because both would try to use port `3000`.
+
 ## Fully local Cloudflare development
 
 Install both dependency trees:

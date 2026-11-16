@@ -199,6 +199,64 @@ export async function removeEntry(
   await parent.removeEntry(name, { recursive: true });
 }
 
+async function entryExists(
+  parent: DirHandleLike,
+  name: string,
+): Promise<boolean> {
+  try {
+    await parent.getFileHandle(name, { create: false });
+    return true;
+  } catch {
+    // Not a file; it may still be a directory.
+  }
+  try {
+    await parent.getDirectoryHandle(name, { create: false });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function copyFileTo(
+  source: FileSystemFileHandle,
+  destinationParent: DirHandleLike,
+  name: string,
+): Promise<void> {
+  const file = await source.getFile();
+  const target = await destinationParent.getFileHandle(name, { create: true });
+  const writable = await target.createWritable();
+  try {
+    await writable.write(await file.arrayBuffer());
+  } finally {
+    await writable.close();
+  }
+}
+
+/**
+ * Chrome exposes move() for files but not for directories. Move a directory
+ * by recreating its tree at the destination, then removing the original.
+ */
+async function copyDirectoryTo(
+  source: DirHandleLike,
+  destinationParent: DirHandleLike,
+  name: string,
+): Promise<void> {
+  const target = await destinationParent.getDirectoryHandle(name, {
+    create: true,
+  });
+  for await (const entry of source.values()) {
+    if (entry.kind === "file") {
+      await copyFileTo(entry as FileSystemFileHandle, target, entry.name);
+    } else {
+      await copyDirectoryTo(
+        entry as unknown as DirHandleLike,
+        target,
+        entry.name,
+      );
+    }
+  }
+}
+
 export async function renameEntry(
   root: DirHandleLike,
   from: string,
@@ -215,12 +273,32 @@ export async function renameEntry(
     .catch(() => null);
   if (!source) throw new Error("Entry no longer exists on disk");
 
-  const movable = source as MoveCapableHandle;
-  if (typeof movable.move !== "function") {
-    throw new Error(
-      "This browser cannot move files. Rename from your file explorer.",
-    );
-  }
   const destinationParent = await resolveDirectory(root, destinationParentPath);
-  await movable.move(destinationParent, destinationName);
+  if (await entryExists(destinationParent, destinationName)) {
+    throw new Error("An entry with that name already exists");
+  }
+
+  const movable = source as MoveCapableHandle;
+  if (typeof movable.move === "function") {
+    await movable.move(destinationParent, destinationName);
+    return;
+  }
+
+  try {
+    if (source.kind === "file") {
+      await copyFileTo(source, destinationParent, destinationName);
+    } else {
+      await copyDirectoryTo(
+        source as unknown as DirHandleLike,
+        destinationParent,
+        destinationName,
+      );
+    }
+  } catch (error) {
+    await destinationParent
+      .removeEntry(destinationName, { recursive: true })
+      .catch(() => undefined);
+    throw error;
+  }
+  await parent.removeEntry(name, { recursive: true });
 }

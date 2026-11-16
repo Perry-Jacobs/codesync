@@ -22,6 +22,7 @@ export {
   listFiles,
   removeFile,
   renameFile,
+  renameFiles,
   replaceFiles,
   upsertFile,
 } from "./files";

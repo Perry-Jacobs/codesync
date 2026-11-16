@@ -1,12 +1,13 @@
 "use client";
 
-import { MessageSquare, Users } from "lucide-react";
+import { MessageSquare, MonitorUp, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui.store";
 import { ChatPanel } from "./ChatPanel";
 import { ParticipantRail } from "./ParticipantRail";
+import { MediaGallery } from "./MediaGallery";
 
-type PanelTab = "people" | "chat";
+type PanelTab = "people" | "gallery" | "chat";
 
 interface SidePanelProps {
   onOpenWaiting(): void;
@@ -20,6 +21,7 @@ export function SidePanel({
 }: SidePanelProps) {
   const unreadChat = useUiStore((state) => state.unreadChat);
   const tab = useUiStore((state) => state.sidePanelTab);
+  const mediaFullscreen = useUiStore((state) => state.mediaFullscreen);
   const setTab = useUiStore((state) => state.setSidePanelTab);
   const panelId =
     variant === "drawer" ? "drawer-session-panel" : "desktop-session-panel";
@@ -39,13 +41,16 @@ export function SidePanel({
         onKeyDown={(event) => {
           if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
           event.preventDefault();
-          setTab(value === "people" ? "chat" : "people");
+          const tabs: PanelTab[] = ["people", "gallery", "chat"];
+          const currentIndex = tabs.indexOf(value);
+          const nextIndex =
+            (currentIndex +
+              (event.key === "ArrowRight" ? 1 : tabs.length - 1)) %
+            tabs.length;
+          const nextTab = tabs[nextIndex];
+          setTab(nextTab);
           window.requestAnimationFrame(() => {
-            document
-              .getElementById(
-                `${panelId}-tab-${value === "people" ? "chat" : "people"}`,
-              )
-              ?.focus();
+            document.getElementById(`${panelId}-tab-${nextTab}`)?.focus();
           });
         }}
         className={cn(
@@ -78,6 +83,7 @@ export function SidePanel({
         )}
       >
         {tabButton("people", "People", <Users className="h-3 w-3" />)}
+        {tabButton("gallery", "Gallery", <MonitorUp className="h-3 w-3" />)}
         {tabButton("chat", "Chat", <MessageSquare className="h-3 w-3" />)}
       </div>
 
@@ -92,6 +98,19 @@ export function SidePanel({
         )}
       >
         <ParticipantRail onOpenWaiting={onOpenWaiting} variant={variant} />
+      </div>
+      <div
+        id={`${panelId}-gallery`}
+        role="tabpanel"
+        aria-labelledby={`${panelId}-tab-gallery`}
+        hidden={tab !== "gallery"}
+        aria-hidden={tab !== "gallery"}
+        className={cn(
+          "min-h-0 flex-1 flex-col",
+          tab === "gallery" ? "flex" : "hidden",
+        )}
+      >
+        {tab === "gallery" && !mediaFullscreen ? <MediaGallery /> : null}
       </div>
       <div
         id={`${panelId}-chat`}

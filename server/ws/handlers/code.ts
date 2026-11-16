@@ -28,6 +28,7 @@ import {
 import { createFsRequest, nextRequestId } from "../../fs/pending";
 import { scheduleWriteback } from "../../fs/writeback";
 import { createLogger } from "../../logger";
+import { presenceForFile, recordPresence } from "../presence-store";
 
 const log = createLogger({ scope: "presence" });
 
@@ -141,6 +142,47 @@ async function deliverSnapshot(
 }
 
 /**
+ * Sends the last known cursor, selection and viewport of every other editor in
+ * this file. Without it a late joiner sees no collaborator cursor until that
+ * collaborator happens to move again.
+ */
+function replayFilePresence(
+  ctx: SocketContext,
+  room: RoomRecord,
+  fileId: string,
+): void {
+  for (const presence of presenceForFile(
+    room.id,
+    fileId,
+    ctx.participant?.id ?? "",
+  )) {
+    if (presence.cursor) {
+      ctx.send("cursor", {
+        participantId: presence.participantId,
+        fileId,
+        line: presence.cursor.line,
+        column: presence.cursor.column,
+        topLine: presence.cursor.topLine,
+      });
+    }
+    if (presence.selection) {
+      ctx.send("selection", {
+        participantId: presence.participantId,
+        fileId,
+        ranges: presence.selection,
+      });
+    }
+    if (presence.viewport !== undefined) {
+      ctx.send("viewport", {
+        participantId: presence.participantId,
+        fileId,
+        topLine: presence.viewport,
+      });
+    }
+  }
+}
+
+/**
  * Acquire a document and, for a cold local-fs file, seed it from the host's
  * disk. A failed read must not leave an empty document behind: otherwise the
  * next open sees `created === false` and serves empty content forever.
@@ -164,18 +206,11 @@ export async function openFile(
   ctx: SocketContext,
   data: Pick<ClientPayloads["file_op"], "fileId" | "path">,
 ): Promise<void> {
-  const { room, participant } = await requireRoom(ctx);
-  if (
-    room.workspaceMode === "local-fs" &&
-    !hasCapability(participant, "edit_code")
-  ) {
-    throw new WsError(
-      "FORBIDDEN",
-      "The host has not granted you access to this local folder",
-    );
-  }
+  const { room } = await requireRoom(ctx);
+  // Opening a file is a read operation. Read-only participants may follow the
+  // document; writes remain gated by handleYjsUpdate.
   const file = await resolveFile(room.id, data.fileId, data.path);
-  subscribeFile(ctx, file.fileId);
+  const createdSubscription = subscribeFile(ctx, file.fileId);
 
   try {
     await withFileLock(`${room.id}:${file.fileId}`, async () => {
@@ -183,43 +218,43 @@ export async function openFile(
       await deliverSnapshot(ctx, room, file);
     });
   } catch (error) {
-    unsubscribeFile(ctx, file.fileId);
+    if (createdSubscription) unsubscribeFile(ctx, file.fileId);
     throw error;
   }
+  replayFilePresence(ctx, room, file.fileId);
 }
 
 export async function handleFileSyncRequest(
   ctx: SocketContext,
   data: ClientPayloads["yjs_sync_request"],
 ): Promise<void> {
-  const { room, participant } = await requireRoom(ctx);
-  if (
-    room.workspaceMode === "local-fs" &&
-    !hasCapability(participant, "edit_code")
-  ) {
-    throw new WsError(
-      "FORBIDDEN",
-      "The host has not granted you access to this local folder",
-    );
-  }
+  const { room } = await requireRoom(ctx);
+  // Read-only participants can request the current document for a file they
+  // opened. They never reach the write path below.
   const file = await getFileById(room.id, data.fileId);
   if (!file || file.kind !== "file")
     throw new WsError("CONFLICT", "File not found");
-  subscribeFile(ctx, file.fileId);
+  const createdSubscription = subscribeFile(ctx, file.fileId);
 
-  await withFileLock(`${room.id}:${file.fileId}`, async () => {
-    await acquireSeededDoc(room, file, ctx);
-    const stateVector = data.stateVector
-      ? new Uint8Array(Buffer.from(data.stateVector, "base64"))
-      : undefined;
-    const update = encodeDiff(room.id, file.fileId, stateVector);
-    if (!update) throw new WsError("INTERNAL", "Document unavailable");
-    ctx.send("yjs_sync", {
-      fileId: file.fileId,
-      update: Buffer.from(update).toString("base64"),
-      kind: stateVector ? "diff" : "snapshot",
+  try {
+    await withFileLock(`${room.id}:${file.fileId}`, async () => {
+      await acquireSeededDoc(room, file, ctx);
+      const stateVector = data.stateVector
+        ? new Uint8Array(Buffer.from(data.stateVector, "base64"))
+        : undefined;
+      const update = encodeDiff(room.id, file.fileId, stateVector);
+      if (!update) throw new WsError("INTERNAL", "Document unavailable");
+      ctx.send("yjs_sync", {
+        fileId: file.fileId,
+        update: Buffer.from(update).toString("base64"),
+        kind: stateVector ? "diff" : "snapshot",
+      });
     });
-  });
+  } catch (error) {
+    if (createdSubscription) unsubscribeFile(ctx, file.fileId);
+    throw error;
+  }
+  replayFilePresence(ctx, room, file.fileId);
 }
 
 export async function handleYjsUpdate(
@@ -233,7 +268,7 @@ export async function handleYjsUpdate(
   const file = await getFileById(room.id, data.fileId);
   if (!file || file.kind !== "file")
     throw new WsError("CONFLICT", "File not found");
-  subscribeFile(ctx, file.fileId);
+  const createdSubscription = subscribeFile(ctx, file.fileId);
 
   try {
     await withFileLock(`${room.id}:${file.fileId}`, async () => {
@@ -256,7 +291,7 @@ export async function handleYjsUpdate(
       if (!applied) throw new WsError("CONFLICT", "Update rejected");
     });
   } catch (error) {
-    unsubscribeFile(ctx, file.fileId);
+    if (createdSubscription) unsubscribeFile(ctx, file.fileId);
     throw error;
   }
 
@@ -267,7 +302,6 @@ export async function handleYjsUpdate(
     {
       fileId: data.fileId,
       exceptSocketId: ctx.id,
-      requireEdit: room.workspaceMode === "local-fs",
     },
   );
   markTyping(ctx);
@@ -320,6 +354,12 @@ export async function handleCursorMove(
     throw new WsError("CONFLICT", "File not found in this workspace");
   }
   subscribeFile(ctx, data.fileId);
+  recordPresence(room.id, participant.id, data.fileId, {
+    kind: "cursor",
+    line: data.line,
+    column: data.column,
+    topLine: data.topLine,
+  });
   log.debug("cursor received", {
     participantId: participant.id,
     canEdit: participant.canEdit,
@@ -355,6 +395,10 @@ export async function handleSelectionChange(
     throw new WsError("CONFLICT", "File not found in this workspace");
   }
   subscribeFile(ctx, data.fileId);
+  recordPresence(room.id, participant.id, data.fileId, {
+    kind: "selection",
+    ranges: data.ranges,
+  });
   emit(
     room.id,
     "selection",
@@ -369,6 +413,15 @@ export async function handleViewportChange(
 ): Promise<void> {
   const { room, participant } = await requireRoom(ctx);
   if (!hasCapability(participant, "edit_code")) return;
+  const file = await getFileById(room.id, data.fileId);
+  if (!file || file.kind !== "file") {
+    throw new WsError("CONFLICT", "File not found in this workspace");
+  }
+  subscribeFile(ctx, file.fileId);
+  recordPresence(room.id, participant.id, file.fileId, {
+    kind: "viewport",
+    topLine: data.topLine,
+  });
   emit(
     room.id,
     "viewport",

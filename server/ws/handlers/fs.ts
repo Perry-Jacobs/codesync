@@ -11,7 +11,7 @@ import {
   getParticipant,
   listFiles,
   removeFile,
-  renameFile,
+  renameFiles,
   replaceFiles,
   updateRoom,
   upsertFile,
@@ -21,10 +21,10 @@ import type { ParticipantRecord, RoomRecord } from "../../rooms/types";
 import { WsError } from "../../errors";
 import { createLogger } from "../../logger";
 import {
+  clearFileSubscriptions,
   clearRoomFileSubscriptions,
   emit,
   sendToParticipant,
-  unsubscribeFile,
 } from "../broadcast";
 import type { SocketContext } from "../connection";
 import { openFile, requireRoom } from "./code";
@@ -37,6 +37,12 @@ import {
 } from "../../fs/pending";
 import { clearRoomDocs, deleteDoc } from "../../yjs/store";
 import { cancelWritebacks } from "../../fs/writeback";
+import { forgetFile, clearRoomPresence } from "../presence-store";
+import {
+  moveWorkspacePath,
+  workspaceMoveConflict,
+  workspacePathConflict,
+} from "@/lib/workspace-paths";
 
 const log = createLogger({ scope: "fs" });
 const MAX_FILES = 600;
@@ -89,11 +95,6 @@ function requireWriteAccess(participant: ParticipantRecord): void {
   }
 }
 
-function fileLabel(path: string): string {
-  const segments = path.split("/");
-  return segments[segments.length - 1] ?? path;
-}
-
 export async function handleFileOp(
   ctx: SocketContext,
   data: ClientPayloads["file_op"],
@@ -111,9 +112,10 @@ export async function handleFileOp(
   if (data.op === "create" || data.op === "mkdir") {
     if (files.length >= MAX_FILES)
       throw new WsError("CONFLICT", "Workspace file limit reached");
-    if (await getFileByPath(room.id, data.path)) {
-      throw new WsError("CONFLICT", `${fileLabel(data.path)} already exists`);
-    }
+    const conflict = workspacePathConflict(files, data.path, {
+      allowImplicitDirectory: data.op === "mkdir",
+    });
+    if (conflict) throw new WsError("CONFLICT", conflict);
     if (room.workspaceMode === "local-fs") {
       const ack = await requestHost(
         room,
@@ -157,12 +159,8 @@ export async function handleFileOp(
     if (!toPath)
       throw new WsError("INVALID_MESSAGE", "Missing destination path");
     if (toPath === file.path) return;
-    if (file.kind === "dir" && toPath.startsWith(`${file.path}/`)) {
-      throw new WsError("CONFLICT", "Cannot move a folder inside itself");
-    }
-    if (await getFileByPath(room.id, toPath)) {
-      throw new WsError("CONFLICT", `${fileLabel(toPath)} already exists`);
-    }
+    const conflict = workspaceMoveConflict(files, file.path, toPath, file.kind);
+    if (conflict) throw new WsError("CONFLICT", conflict);
     if (room.workspaceMode === "local-fs") {
       const ack = await requestHost(
         room,
@@ -178,27 +176,24 @@ export async function handleFileOp(
         );
     }
 
-    if (file.kind === "dir") {
-      const descendants = files.filter((entry) =>
-        entry.path.startsWith(`${file.path}/`),
-      );
-      for (const entry of descendants) {
-        const nextPath = `${toPath}${entry.path.slice(file.path.length)}`;
-        const moved: FileMeta = {
-          ...entry,
-          path: nextPath,
-          lang: languageFromPath(nextPath),
-        };
-        await renameFile(room.id, entry.path, nextPath, moved);
-      }
-    }
-    const moved: FileMeta = {
-      ...file,
-      path: toPath,
-      lang: file.kind === "file" ? languageFromPath(toPath) : "plaintext",
-      mtime: Date.now(),
-    };
-    await renameFile(room.id, file.path, toPath, moved);
+    const affected = files.filter(
+      (entry) =>
+        entry.path === file.path ||
+        (file.kind === "dir" && entry.path.startsWith(`${file.path}/`)),
+    );
+    const movedEntries = affected.map((entry) => {
+      const nextPath = moveWorkspacePath(entry.path, file.path, toPath);
+      const moved: FileMeta = {
+        ...entry,
+        path: nextPath,
+        lang: entry.kind === "file" ? languageFromPath(nextPath) : "plaintext",
+        mtime: Date.now(),
+      };
+      return { from: entry.path, file: moved };
+    });
+    await renameFiles(room.id, movedEntries);
+    const moved = movedEntries.find((entry) => entry.from === file.path)?.file;
+    if (!moved) throw new WsError("INTERNAL", "Could not move workspace entry");
     emit(
       room.id,
       "file_changed",
@@ -226,7 +221,8 @@ export async function handleFileOp(
           )
         : [file];
     for (const entry of doomed) {
-      unsubscribeFile(ctx, entry.fileId);
+      clearFileSubscriptions(room.id, entry.fileId);
+      forgetFile(room.id, entry.fileId);
       if (entry.kind === "file") await deleteDoc(room.id, entry.fileId);
       await removeFile(room.id, entry.path);
     }
@@ -248,11 +244,26 @@ export async function handleBridgeAttach(
 
   if (!data.connected) {
     clearRoomFileSubscriptions(room.id);
+    const previous = await listFiles(room.id);
     const nextMode: WorkspaceMode = "virtual";
     await updateRoom(room.id, { workspaceMode: nextMode, rootName: null });
     cancelWritebacks(room.id);
-    emit(room.id, "file_tree", { files: await listFiles(room.id) }, {});
-    log.info("workspace detached", { roomId: room.id });
+    await clearRoomDocs(room.id);
+    await replaceFiles(room.id, []);
+    emit(
+      room.id,
+      "workspace_reset",
+      {
+        files: [],
+        rootName: null,
+        mode: nextMode,
+      },
+      {},
+    );
+    log.info("workspace detached", {
+      roomId: room.id,
+      removedEntries: previous.length,
+    });
     return;
   }
 
@@ -274,6 +285,7 @@ export async function handleBridgeAttach(
   // Disk becomes the source of truth: invalidate subscriptions, drop cached
   // Yjs docs, and reseed lazily.
   clearRoomFileSubscriptions(room.id);
+  clearRoomPresence(room.id);
   await clearRoomDocs(room.id);
   cancelWritebacks(room.id);
   await replaceFiles(room.id, nextFiles);

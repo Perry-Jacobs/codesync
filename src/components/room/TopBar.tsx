@@ -269,16 +269,20 @@ export function TopBar({
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {canAdmit ? (
+        {canAdmit && waiting.length > 0 ? (
           <Button
             variant="ghost"
             size="sm"
             className="h-7 gap-1 px-2 text-[10px]"
             onClick={() => send("host_action", { action: "admit_all" })}
-            disabled={waiting.length === 0}
+            aria-label={`Admit all ${waiting.length} waiting ${waiting.length === 1 ? "guest" : "guests"}`}
+            title="Admit everyone waiting"
           >
             <UserCheck className="h-3 w-3" />
-            {waiting.length > 0 ? `${waiting.length}` : "0"}
+            <span>Admit</span>
+            <span className="rounded-full bg-primary/15 px-1 font-semibold text-primary">
+              {waiting.length}
+            </span>
           </Button>
         ) : null}
 
@@ -289,13 +293,20 @@ export function TopBar({
                 variant="ghost"
                 size="sm"
                 className="h-7 gap-1 px-2 text-[10px]"
+                aria-label={
+                  self?.role === "CO_HOST"
+                    ? "Co-host session controls"
+                    : "Host session controls"
+                }
               >
                 <ShieldCheck className="h-3 w-3" />
-                <span className="hidden sm:inline">Host</span>
+                <span className="hidden sm:inline">
+                  {self?.role === "CO_HOST" ? "Co-host" : "Host"}
+                </span>
                 <ChevronDown className="hidden h-3 w-3 sm:block" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-60">
+            <DropdownMenuContent align="end" className="w-64">
               <DropdownMenuLabel>Session controls</DropdownMenuLabel>
               <DropdownMenuItem
                 disabled={!canLock}

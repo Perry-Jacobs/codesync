@@ -25,6 +25,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { FileTree } from "@/components/room/FileTree";
+import { MediaGallery } from "@/components/room/MediaGallery";
 import { ResizableSidePanel } from "@/components/room/ResizableSidePanel";
 import { SidePanel } from "@/components/room/SidePanel";
 import { TopBar } from "@/components/room/TopBar";
@@ -35,7 +36,6 @@ import { useRoomHotkeys } from "@/hooks/useRoomHotkeys";
 import { useWebRTC } from "@/hooks/useWebRTC";
 
 import { cn } from "@/lib/utils";
-import { hasCapability } from "@/lib/acl";
 import { useRoomStore } from "@/stores/room.store";
 import { useUiStore } from "@/stores/ui.store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout.store";
@@ -50,12 +50,14 @@ export function RoomShell({ roomKey }: { roomKey: string }) {
   const connection = useRoomStore((state) => state.connection);
   const error = useRoomStore((state) => state.error);
   const files = useWorkspaceStore((state) => state.files);
-  const mode = useWorkspaceStore((state) => state.mode);
   const openFile = useWorkspaceStore((state) => state.openFile);
   const sidebarOpen = useUiStore((state) => state.sidebarOpen);
   const railOpen = useUiStore((state) => state.railOpen);
   const setSidebarOpen = useUiStore((state) => state.setSidebarOpen);
   const setRailOpen = useUiStore((state) => state.setRailOpen);
+  const setSidePanelTab = useUiStore((state) => state.setSidePanelTab);
+  const mediaFullscreen = useUiStore((state) => state.mediaFullscreen);
+
   const workspaceRevision = useWorkspaceStore((state) => state.revision);
   const sidebarWidth = useWorkspaceLayoutStore((state) => state.sidebarWidth);
   const railWidth = useWorkspaceLayoutStore((state) => state.railWidth);
@@ -73,20 +75,59 @@ export function RoomShell({ roomKey }: { roomKey: string }) {
   const [mobileRail, setMobileRail] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(1280);
   const openedInitialFile = useRef(false);
+  const wasScreenSharing = useRef(false);
   const isDesktopRail = viewportWidth >= 1024;
+  const someoneIsScreenSharing = useRoomStore((state) =>
+    state.participants.some((participant) => participant.screen),
+  );
 
   useEffect(() => {
     void useWorkspaceLayoutStore.persist.rehydrate();
+    useUiStore.getState().setMediaFullscreen(false);
 
     const updateViewportWidth = (): void => setViewportWidth(window.innerWidth);
     updateViewportWidth();
     window.addEventListener("resize", updateViewportWidth);
-    return () => window.removeEventListener("resize", updateViewportWidth);
+    return () => {
+      window.removeEventListener("resize", updateViewportWidth);
+      useUiStore.getState().setMediaFullscreen(false);
+    };
   }, []);
 
   useEffect(() => {
     if (isDesktopRail) setMobileRail(false);
   }, [isDesktopRail]);
+
+  // Track whether the rail is genuinely on screen. The chat unread badge uses
+  // this instead of `railOpen`, which stays true behind a closed compact
+  // drawer and would otherwise swallow messages that arrive while it hides.
+  useEffect(() => {
+    useUiStore.getState().setRailVisible(isDesktopRail ? railOpen : mobileRail);
+  }, [isDesktopRail, mobileRail, railOpen]);
+
+  // The compact explorer is a drawer over the editor. Dismiss it as soon as a
+  // file is picked, on Escape, or when the full sidebar becomes available.
+  useEffect(() => {
+    if (!mobileFiles) return;
+    const dismiss = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setMobileFiles(false);
+    };
+    document.addEventListener("keydown", dismiss, true);
+    return () => document.removeEventListener("keydown", dismiss, true);
+  }, [mobileFiles]);
+
+  useEffect(() => {
+    if (viewportWidth >= 768) setMobileFiles(false);
+  }, [viewportWidth]);
+
+  useEffect(() => {
+    if (someoneIsScreenSharing && !wasScreenSharing.current) {
+      setSidePanelTab("gallery");
+      if (isDesktopRail) setRailOpen(true);
+      else setMobileRail(true);
+    }
+    wasScreenSharing.current = someoneIsScreenSharing;
+  }, [isDesktopRail, setRailOpen, setSidePanelTab, someoneIsScreenSharing]);
 
   // Attaching, detaching or reloading a host folder replaces the workspace;
   // open the first file of the new tree so nobody is left on a blank editor.
@@ -95,15 +136,15 @@ export function RoomShell({ roomKey }: { roomKey: string }) {
   }, [workspaceRevision]);
 
   // Open the first file once the workspace arrives so the editor is never empty.
+  // Read-only participants follow the same file; the editor stays read-only.
   useEffect(() => {
     if (status !== "admitted" || openedInitialFile.current) return;
     const first = files.find((file) => file.kind === "file");
     if (!first) return;
-    if (mode === "local-fs" && !hasCapability(self, "edit_code")) return;
     openedInitialFile.current = true;
     openFile({ fileId: first.fileId, path: first.path });
     send("file_op", { op: "open", fileId: first.fileId, path: first.path });
-  }, [files, mode, openFile, self, send, status]);
+  }, [files, openFile, send, status]);
 
   const toggleFiles = (): void => {
     if (window.matchMedia("(max-width: 767px)").matches) {
@@ -238,7 +279,10 @@ export function RoomShell({ roomKey }: { roomKey: string }) {
             <div className="min-h-0 flex-1">
               <EditorPane />
             </div>
-            <VideoDock webrtc={webrtc} />
+            <VideoDock
+              webrtc={webrtc}
+              galleryVisible={isDesktopRail ? railOpen : mobileRail}
+            />
           </main>
 
           {isDesktopRail && railOpen ? (
@@ -270,7 +314,7 @@ export function RoomShell({ roomKey }: { roomKey: string }) {
             <SheetTitle>Workspace files</SheetTitle>
             <SheetDescription>Files in this session</SheetDescription>
           </SheetHeader>
-          <FileTree host={host} />
+          <FileTree host={host} onFileOpen={() => setMobileFiles(false)} />
         </SheetContent>
       </Sheet>
 
@@ -297,6 +341,7 @@ export function RoomShell({ roomKey }: { roomKey: string }) {
       ) : null}
 
       <WaitingRoomSheet open={waitingOpen} onOpenChange={setWaitingOpen} />
+      {mediaFullscreen ? <MediaGallery fullscreen /> : null}
     </div>
   );
 }

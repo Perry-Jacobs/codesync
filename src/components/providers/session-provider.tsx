@@ -31,11 +31,13 @@ import { hasCapability } from "@/lib/acl";
 import {
   fsRequestBus,
   hostActionBus,
+  peerResetBus,
   presenceBus,
   webrtcBus,
   yjsBus,
 } from "@/lib/buses";
 import { toPresenceEvent } from "@/lib/presence-events";
+import { ChatNotificationGate } from "@/lib/chat-notification";
 
 type ConnectOptions = Partial<JoinCredentials> & {
   displayName?: string;
@@ -99,6 +101,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const admittedRef = useRef(false);
   const admissionPendingRef = useRef(false);
+  const hostFallbackRef = useRef(false);
+  const chatNotificationGateRef = useRef(new ChatNotificationGate());
   const autoConnectedFor = useRef<string | null>(null);
   const previousRoomKey = useRef(roomKey);
   const routeRef = useRef({ roomKey, pathname });
@@ -162,6 +166,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           room.setReconnectToken(message.data.reconnectToken);
           admittedRef.current = true;
           admissionPendingRef.current = false;
+          hostFallbackRef.current = false;
           media.setMicEnabled(message.data.self.mic);
           media.setCamEnabled(message.data.self.cam);
           const firstAdmission = room.status !== "admitted";
@@ -186,6 +191,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           );
           const next = message.data.participant;
           room.upsertParticipant(next);
+          if (previous && previous.state !== next.state) {
+            peerResetBus.emit(next.id);
+          }
 
           // A hand going up is a signal people should not have to stare at the
           // rail to notice; announce it once, and let managers grant the floor
@@ -227,11 +235,19 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           const leaving = room.participants.find(
             (p) => p.id === message.data.participantId,
           );
+          presenceBus.emit({
+            kind: "clear-participant",
+            participantId: message.data.participantId,
+          });
           const transientDrop = message.data.reason === "dropped";
-          if (!transientDrop) {
-            room.removeParticipant(message.data.participantId);
-            media.removePeer(message.data.participantId);
+          if (transientDrop) {
+            peerResetBus.emit(message.data.participantId);
           }
+          // A socket drop removes the person from the live roster. Their seat
+          // survives on the server for a reconnect, but keeping the ghost in
+          // the UI produced duplicate entries — especially a stale HOST.
+          room.removeParticipant(message.data.participantId);
+          media.removePeer(message.data.participantId);
           if (message.data.participantId === room.self?.id) {
             // A dropped socket is recoverable; explicit removal is terminal.
             if (message.data.reason !== "dropped")
@@ -260,6 +276,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
             window.localStorage.removeItem(`${HOST_PREFIX}${key}`);
           }
           room.applyPermission(message.data);
+          if (message.data.role !== "HOST" && !message.data.canEdit) {
+            presenceBus.emit({
+              kind: "clear-participant",
+              participantId: message.data.participantId,
+            });
+          }
           if (room.self?.id === message.data.participantId) {
             const access = message.data.canEdit
               ? "You can edit files."
@@ -286,9 +308,27 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           break;
         }
         case "chat_message": {
-          room.addChatMessage(message.data.message);
-          if (message.data.message.participantId !== room.self?.id) {
-            if (ui.sidePanelTab !== "chat") ui.incrementUnread();
+          const chatMessage = message.data.message;
+          const notificationScope = `${key}:${room.sessionEpoch}`;
+          const notification = chatNotificationGateRef.current.notificationFor(
+            chatMessage,
+            room.self?.id ?? null,
+            notificationScope,
+          );
+          const isIncoming = chatMessage.participantId !== room.self?.id;
+          room.addChatMessage(chatMessage);
+          if (isIncoming) {
+            // Only treat chat as read when the rail is physically open on the
+            // chat tab. A hidden rail (desktop toggle or compact drawer) must
+            // still collect unread messages.
+            if (ui.sidePanelTab !== "chat" || !ui.railVisible)
+              ui.incrementUnread();
+            if (notification) {
+              toast(notification.title, {
+                description: notification.description,
+                duration: 5000,
+              });
+            }
           }
           break;
         }
@@ -341,8 +381,20 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         }
         case "file_changed": {
           const { op, path: changedPath, toPath, meta } = message.data;
-          if (op === "delete") workspace.removePath(changedPath);
-          else if (op === "rename" || op === "move")
+          if (op === "delete") {
+            const removedActive = workspace.tabs.some(
+              (tab) =>
+                tab.fileId === workspace.activeFileId &&
+                (tab.path === changedPath ||
+                  tab.path.startsWith(`${changedPath}/`)),
+            );
+            workspace.removePath(changedPath);
+            if (removedActive) {
+              toast.warning("The file you were viewing was deleted", {
+                description: changedPath,
+              });
+            }
+          } else if (op === "rename" || op === "move")
             workspace.movePath(changedPath, toPath ?? changedPath, meta);
           else if (meta) workspace.upsertMeta(meta);
           break;
@@ -436,6 +488,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           break;
         }
         case "reaction": {
+          // Reactions are broadcast to everyone; don't echo the sender's own
+          // reaction back to them.
+          if (message.data.participantId === room.self?.id) break;
           const author = room.participants.find(
             (p) => p.id === message.data.participantId,
           );
@@ -461,22 +516,56 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           break;
         }
         case "room_ended": {
+          clientRef.current?.stopReconnecting();
           room.setStatus("ended");
           room.setError("The host ended this session");
           clearReconnectCredential(key);
-          toast.message("The host ended this session");
-          routerRef.current.replace("/");
+          // One id keeps duplicate broadcasts / a follow-up ROOM_ENDED join
+          // error from stacking the same toast.
+          toast.message("The host ended this session", { id: "room-ended" });
           break;
         }
         case "error": {
-          toast.error(message.data.message, {
-            id: `${message.data.code}:${message.data.message}`,
-          });
           if (message.data.code === "ROOM_ENDED") {
+            clientRef.current?.stopReconnecting();
             room.setStatus("ended");
             room.setError(message.data.message);
             clearReconnectCredential(key);
-          } else if (
+            toast.message(message.data.message, { id: "room-ended" });
+            break;
+          }
+          // A stale reconnect token can outlive its server-side credential
+          // while this browser still holds the durable host token. Retry the
+          // join as the host before surfacing a lockout.
+          if (
+            message.data.code === "UNAUTHENTICATED" &&
+            key &&
+            !hostFallbackRef.current
+          ) {
+            const staleReconnect = window.sessionStorage.getItem(
+              `${RT_PREFIX}${key}`,
+            );
+            const storedHostToken = window.localStorage.getItem(
+              `${HOST_PREFIX}${key}`,
+            );
+            if (staleReconnect && storedHostToken) {
+              hostFallbackRef.current = true;
+              clearReconnectCredential(key);
+              const retried = clientRef.current?.retryJoin({
+                reconnectToken: undefined,
+                hostToken: storedHostToken,
+              });
+              if (retried) {
+                room.setStatus("joining");
+                room.setError(null);
+                break;
+              }
+            }
+          }
+          toast.error(message.data.message, {
+            id: `${message.data.code}:${message.data.message}`,
+          });
+          if (
             message.data.code === "FORBIDDEN" &&
             message.data.message ===
               "This participant can no longer rejoin the session"
@@ -517,6 +606,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           admissionPendingRef.current = true;
         } else if (next === "closed" || next === "idle") {
           admissionPendingRef.current = false;
+        }
+        if (next !== "open" && useRoomStore.getState().status === "admitted") {
+          useRoomStore.getState().setStatus("joining");
         }
         setStatus(next);
         useRoomStore.getState().setConnection(next);
@@ -566,6 +658,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       };
       admissionPendingRef.current = true;
       admittedRef.current = false;
+      hostFallbackRef.current = false;
       clientRef.current?.connect(credentials);
       return true;
     },
@@ -574,6 +667,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const disconnect = useCallback(() => {
     clientRef.current?.disconnect();
+    webrtcBus.resetHistory();
     // An explicit disconnect is a terminal leave. Socket drops that happen on
     // their own never call this and keep the credential for reconnection.
     clearReconnectCredential(roomKey);
@@ -583,6 +677,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (previousRoomKey.current !== roomKey) {
       clientRef.current?.disconnect();
+      webrtcBus.resetHistory();
       resetSessionState();
       autoConnectedFor.current = null;
       previousRoomKey.current = roomKey;

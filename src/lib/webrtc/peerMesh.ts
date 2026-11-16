@@ -31,6 +31,7 @@ export interface PeerMeshOptions {
  */
 export class PeerMesh {
   private readonly peers = new Map<string, PeerEntry>();
+  private signalQueue: Promise<void> = Promise.resolve();
   private audioTrack: MediaStreamTrack | null = null;
   private videoTrack: MediaStreamTrack | null = null;
 
@@ -62,15 +63,16 @@ export class PeerMesh {
     };
     this.peers.set(peerId, entry);
 
-    pc.addTransceiver("audio", { direction: "sendrecv" });
-    const video = pc.addTransceiver("video", { direction: "sendrecv" });
-    if (this.audioTrack) {
-      const sender = pc
-        .getTransceivers()
-        .find((t) => t.receiver.track.kind === "audio")?.sender;
-      void sender?.replaceTrack(this.audioTrack);
+    // Only the deterministic initiator pre-creates transceivers. The answerer
+    // derives them from the remote offer; pre-creating them on both sides can
+    // produce duplicate media sections and leave tracks attached to inactive
+    // transceivers.
+    if (!polite) {
+      const audio = pc.addTransceiver("audio", { direction: "sendrecv" });
+      const video = pc.addTransceiver("video", { direction: "sendrecv" });
+      if (this.audioTrack) void audio.sender.replaceTrack(this.audioTrack);
+      if (this.videoTrack) void video.sender.replaceTrack(this.videoTrack);
     }
-    if (this.videoTrack) void video.sender.replaceTrack(this.videoTrack);
 
     pc.onnegotiationneeded = () => {
       // Only the initiator offers; the polite side always answers.
@@ -158,7 +160,18 @@ export class PeerMesh {
     }
   }
 
-  async handleSignal(peerId: string, signal: RtcSignal): Promise<void> {
+  handleSignal(peerId: string, signal: RtcSignal): Promise<void> {
+    const processing = this.signalQueue.then(() =>
+      this.processSignal(peerId, signal),
+    );
+    this.signalQueue = processing.catch(() => undefined);
+    return processing;
+  }
+
+  private async processSignal(
+    peerId: string,
+    signal: RtcSignal,
+  ): Promise<void> {
     this.ensurePeer(peerId);
     const entry = this.peers.get(peerId);
     if (!entry) return;
@@ -173,6 +186,25 @@ export class PeerMesh {
         }
         await pc.setRemoteDescription({ type: "offer", sdp: signal.sdp });
         await this.flushCandidates(entry);
+
+        // The remote offer created one transceiver per media section. Make
+        // them send-capable and attach the local tracks before creating the
+        // answer so the answerer can publish its camera and microphone.
+        const audio = pc
+          .getTransceivers()
+          .find((tx) => tx.receiver.track.kind === "audio");
+        const video = pc
+          .getTransceivers()
+          .find((tx) => tx.receiver.track.kind === "video");
+        if (audio) {
+          audio.direction = "sendrecv";
+          if (this.audioTrack) await audio.sender.replaceTrack(this.audioTrack);
+        }
+        if (video) {
+          video.direction = "sendrecv";
+          if (this.videoTrack) await video.sender.replaceTrack(this.videoTrack);
+        }
+
         await pc.setLocalDescription();
         if (!pc.localDescription) return;
         this.options.sendSignal(peerId, {
@@ -226,7 +258,16 @@ export class PeerMesh {
         const sender = entry.pc
           .getTransceivers()
           .find((tx) => tx.receiver.track.kind === "audio")?.sender;
-        await sender?.replaceTrack(track).catch(() => undefined);
+        if (!sender) return;
+        try {
+          await sender.replaceTrack(track);
+        } catch (error) {
+          this.options.onError?.(
+            error instanceof Error
+              ? error.message
+              : "Could not update the microphone for a participant",
+          );
+        }
       }),
     );
   }
@@ -238,7 +279,16 @@ export class PeerMesh {
         const sender = entry.pc
           .getTransceivers()
           .find((tx) => tx.receiver.track.kind === "video")?.sender;
-        await sender?.replaceTrack(track).catch(() => undefined);
+        if (!sender) return;
+        try {
+          await sender.replaceTrack(track);
+        } catch (error) {
+          this.options.onError?.(
+            error instanceof Error
+              ? error.message
+              : "Could not update the camera or shared screen for a participant",
+          );
+        }
       }),
     );
   }
@@ -253,6 +303,7 @@ export class PeerMesh {
     entry.pc.ontrack = null;
     entry.pc.onconnectionstatechange = null;
     entry.pc.close();
+    this.options.onStateChange(peerId, "disconnected");
     this.options.onRemoteStream(peerId, null);
   }
 

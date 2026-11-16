@@ -1,16 +1,24 @@
 "use client";
 
-import { useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useRouter } from "next/navigation";
 import {
   Hand,
+  Maximize2,
   Mic,
   MicOff,
+  Minimize2,
   MonitorUp,
   PhoneOff,
   Video,
   VideoOff,
 } from "lucide-react";
+
 import { useSession } from "@/components/providers/session-provider";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,20 +38,40 @@ import type { WebRtcApi } from "@/hooks/useWebRTC";
 import { cn } from "@/lib/utils";
 import { useMediaStore } from "@/stores/media.store";
 import { useRoomStore } from "@/stores/room.store";
+import { useUiStore } from "@/stores/ui.store";
 import { RemoteAudio, VideoTile } from "./video/VideoTile";
 
 interface VideoDockProps {
   webrtc: WebRtcApi;
+  galleryVisible: boolean;
 }
+
+interface VideoDockDragState {
+  pointerId: number;
+  startY: number;
+  startHeight: number;
+}
+
+const MIN_VIDEO_HEIGHT = 112;
+const MAX_VIDEO_HEIGHT = 720;
+const DEFAULT_VIDEO_HEIGHT = 184;
+const VIDEO_HEIGHT_STORAGE_KEY = "codesync:video-dock-height";
 
 /**
  * Media strip below the editor. The WebRTC hook is owned by RoomShell so the
  * hotkeys and the dock share one media/peer-mesh instance.
  */
-export function VideoDock({ webrtc }: VideoDockProps) {
+export function VideoDock({ webrtc, galleryVisible }: VideoDockProps) {
   const router = useRouter();
   const { send, disconnect } = useSession();
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const [videoHeight, setVideoHeight] = useState(DEFAULT_VIDEO_HEIGHT);
+  const setSidePanelTab = useUiStore((state) => state.setSidePanelTab);
+  const sidePanelTab = useUiStore((state) => state.sidePanelTab);
+  const isFullscreen = useUiStore((state) => state.mediaFullscreen);
+  const setMediaFullscreen = useUiStore((state) => state.setMediaFullscreen);
+  const [dragging, setDragging] = useState(false);
+  const dragState = useRef<VideoDockDragState | null>(null);
   const self = useRoomStore((state) => state.self);
   const participants = useRoomStore((state) => state.participants);
   const remoteStreams = useMediaStore((state) => state.remoteStreams);
@@ -74,6 +102,100 @@ export function VideoDock({ webrtc }: VideoDockProps) {
   );
   const localPreview = screenSharing ? screenStream : localStream;
   const anyVideo = hasLiveVideo(localPreview) || videoRemotes.length > 0;
+  const sharedRemotes = videoRemotes.filter(
+    (participant) => participant.screen,
+  );
+  const localIsShared = screenSharing && hasLiveVideo(screenStream);
+
+  useEffect(() => {
+    const stored = Number(
+      window.localStorage.getItem(VIDEO_HEIGHT_STORAGE_KEY),
+    );
+    if (Number.isFinite(stored) && stored >= MIN_VIDEO_HEIGHT) {
+      setVideoHeight(Math.min(stored, MAX_VIDEO_HEIGHT));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+    };
+  }, [dragging]);
+
+  const clampVideoHeight = (height: number): number =>
+    Math.min(Math.max(height, MIN_VIDEO_HEIGHT), MAX_VIDEO_HEIGHT);
+
+  const updateVideoHeight = (height: number): void => {
+    const nextHeight = clampVideoHeight(height);
+    setVideoHeight(nextHeight);
+    window.localStorage.setItem(VIDEO_HEIGHT_STORAGE_KEY, String(nextHeight));
+  };
+
+  const toggleFullscreen = (): void => {
+    if (isFullscreen) {
+      setMediaFullscreen(false);
+      return;
+    }
+
+    setSidePanelTab("gallery");
+    setMediaFullscreen(true);
+  };
+
+  const handleResizeStart = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ): void => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragState.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: videoHeight,
+    };
+    setDragging(true);
+  };
+
+  const handleResizeMove = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ): void => {
+    const state = dragState.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    updateVideoHeight(state.startHeight + state.startY - event.clientY);
+  };
+
+  const finishResize = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    if (dragState.current?.pointerId !== event.pointerId) return;
+    dragState.current = null;
+    setDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const handleResizeKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ): void => {
+    const step = event.shiftKey ? 40 : 12;
+    if (event.key === "ArrowUp") {
+      updateVideoHeight(videoHeight + step);
+    } else if (event.key === "ArrowDown") {
+      updateVideoHeight(videoHeight - step);
+    } else if (event.key === "Home") {
+      updateVideoHeight(MIN_VIDEO_HEIGHT);
+    } else if (event.key === "End") {
+      updateVideoHeight(MAX_VIDEO_HEIGHT);
+    } else if (event.key === "Enter" || event.key === " ") {
+      updateVideoHeight(DEFAULT_VIDEO_HEIGHT);
+    } else {
+      return;
+    }
+    event.preventDefault();
+  };
 
   const leave = (): void => {
     send("leave_room", { reason: "left the session" });
@@ -90,29 +212,108 @@ export function VideoDock({ webrtc }: VideoDockProps) {
         ) : null;
       })}
 
-      {anyVideo ? (
-        <div className="scrollbar-thin flex gap-2 overflow-x-auto px-2 pt-2">
-          <VideoTile
-            name={self?.name ?? "You"}
-            color={self?.color ?? "#4ea1ff"}
-            stream={localPreview}
-            isSelf
-            micOn={micEnabled}
-            screenSharing={screenSharing}
-            camOff={!camEnabled && !screenSharing}
-          />
-          {videoRemotes.map((participant) => (
-            <VideoTile
-              key={participant.id}
-              name={participant.name}
-              color={participant.color}
-              stream={remoteStreams[participant.id] ?? null}
-              isSelf={false}
-              micOn={participant.mic}
-              screenSharing={participant.screen}
-              camOff={!participant.cam && !participant.screen}
+      {!isFullscreen &&
+      !(galleryVisible && sidePanelTab === "gallery") &&
+      anyVideo ? (
+        <div
+          className="relative min-h-0 border-b border-border/60 bg-black/10"
+          style={{ height: videoHeight, maxHeight: "75dvh" }}
+        >
+          <button
+            type="button"
+            role="separator"
+            aria-label="Resize video area"
+            aria-orientation="horizontal"
+            aria-valuemin={MIN_VIDEO_HEIGHT}
+            aria-valuemax={MAX_VIDEO_HEIGHT}
+            aria-valuenow={Math.round(videoHeight)}
+            title="Drag to resize · arrow keys for precise sizing · double-click to reset"
+
+            className={cn(
+              "group absolute inset-x-0 -top-1 z-20 h-2 cursor-row-resize touch-none outline-none",
+              dragging && "cursor-row-resize",
+            )}
+            onPointerDown={handleResizeStart}
+            onPointerMove={handleResizeMove}
+            onPointerUp={finishResize}
+            onPointerCancel={finishResize}
+            onDoubleClick={() => updateVideoHeight(DEFAULT_VIDEO_HEIGHT)}
+            onKeyDown={handleResizeKeyDown}
+          >
+            <span
+              className={cn(
+                "absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border transition-[background-color,box-shadow] duration-150",
+                "group-hover:bg-primary group-hover:shadow-[0_0_8px_hsl(var(--primary)/0.45)]",
+                "group-focus-visible:bg-primary group-focus-visible:shadow-[0_0_8px_hsl(var(--primary)/0.65)]",
+                dragging &&
+                  "bg-primary shadow-[0_0_10px_hsl(var(--primary)/0.65)]",
+              )}
             />
-          ))}
+          </button>
+
+          <div
+            className={cn(
+              "scrollbar-thin flex h-full gap-3 overflow-x-auto overflow-y-hidden px-3 py-3",
+            )}
+          >
+            {localIsShared ? (
+              <VideoTile
+                name={`${self?.name ?? "You"} — screen`}
+                color={self?.color ?? "#4ea1ff"}
+                stream={screenStream}
+                isSelf
+                micOn={micEnabled}
+                screenSharing
+                className={cn(
+                  isFullscreen
+                    ? "aspect-video w-full min-w-0"
+                    : "h-full w-auto min-w-[220px] max-w-[420px]",
+                )}
+              />
+            ) : null}
+            {sharedRemotes.map((participant) => (
+              <VideoTile
+                key={`shared-${participant.id}`}
+                name={`${participant.name} — screen`}
+                color={participant.color}
+                stream={remoteStreams[participant.id] ?? null}
+                isSelf={false}
+                micOn={participant.mic}
+                screenSharing
+                className={cn(
+                  isFullscreen
+                    ? "aspect-video w-full min-w-0"
+                    : "h-full w-auto min-w-[220px] max-w-[420px]",
+                )}
+              />
+            ))}
+            {!localIsShared ? (
+              <VideoTile
+                name={self?.name ?? "You"}
+                color={self?.color ?? "#4ea1ff"}
+                stream={localPreview}
+                isSelf
+                micOn={micEnabled}
+                screenSharing={screenSharing}
+                camOff={!camEnabled && !screenSharing}
+                className={cn(isFullscreen && "aspect-video w-full min-w-0")}
+              />
+            ) : null}
+            {videoRemotes
+              .filter((participant) => !participant.screen)
+              .map((participant) => (
+                <VideoTile
+                  key={participant.id}
+                  name={participant.name}
+                  color={participant.color}
+                  stream={remoteStreams[participant.id] ?? null}
+                  isSelf={false}
+                  micOn={participant.mic}
+                  camOff={!participant.cam}
+                  className={cn(isFullscreen && "aspect-video w-full min-w-0")}
+                />
+              ))}
+          </div>
         </div>
       ) : null}
 
@@ -171,25 +372,27 @@ export function VideoDock({ webrtc }: VideoDockProps) {
               className={cn(
                 "h-8 w-8",
                 screenSharing && "text-violet-400",
-                !canShareScreen && "opacity-40",
+                !canShareScreen && !screenSharing && "opacity-40",
               )}
               onClick={() => void toggleScreen()}
-              disabled={!canShareScreen}
+              disabled={!canShareScreen && !screenSharing}
               aria-label={
-                canShareScreen
-                  ? "Share screen"
-                  : "Screen sharing is not allowed"
+                screenSharing
+                  ? "Stop sharing"
+                  : canShareScreen
+                    ? "Share screen"
+                    : "Screen sharing is not allowed"
               }
             >
               <MonitorUp className="h-4 w-4" />
             </Button>
           </TooltipTrigger>
           <TooltipContent>
-            {canShareScreen
-              ? screenSharing
-                ? "Stop sharing"
-                : "Share your screen"
-              : "Only the host and co-hosts can share"}
+            {screenSharing
+              ? "Stop sharing"
+              : canShareScreen
+                ? "Share your screen"
+                : "Only the host and co-hosts can share"}
           </TooltipContent>
         </Tooltip>
 
@@ -233,6 +436,33 @@ export function VideoDock({ webrtc }: VideoDockProps) {
         )}
 
         <div className="ml-auto flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="h-8 w-8"
+                onClick={() => void toggleFullscreen()}
+                disabled={!anyVideo}
+                aria-label={
+                  isFullscreen ? "Exit fullscreen" : "View media fullscreen"
+                }
+              >
+                {isFullscreen ? (
+                  <Minimize2 className="h-4 w-4" />
+                ) : (
+                  <Maximize2 className="h-4 w-4" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {isFullscreen
+                ? "Exit fullscreen"
+                : anyVideo
+                  ? "View cameras and screens fullscreen"
+                  : "Turn on a camera or share a screen first"}
+            </TooltipContent>
+          </Tooltip>
           <Button
             variant="ghost"
             size="sm"

@@ -71,10 +71,21 @@ export async function renameFile(
   to: string,
   file: FileMeta,
 ): Promise<void> {
-  await getRedis()
-    .multi()
-    .hdel(keys.files(roomId), from)
-    .hset(keys.files(roomId), to, JSON.stringify(file))
-    .expire(keys.files(roomId), getEnv().roomTtlSeconds)
-    .exec();
+  await renameFiles(roomId, [{ from, file: { ...file, path: to } }]);
+}
+
+/** Atomically updates every metadata path involved in a directory move. */
+export async function renameFiles(
+  roomId: string,
+  moves: Array<{ from: string; file: FileMeta }>,
+): Promise<void> {
+  if (moves.length === 0) return;
+  const redis = getRedis();
+  const multi = redis.multi();
+  for (const { from } of moves) multi.hdel(keys.files(roomId), from);
+  for (const { file } of moves) {
+    multi.hset(keys.files(roomId), file.path, JSON.stringify(file));
+  }
+  multi.expire(keys.files(roomId), getEnv().roomTtlSeconds);
+  await multi.exec();
 }

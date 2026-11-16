@@ -39,6 +39,8 @@ import {
   roomSocketCount,
   unregisterSocket,
 } from "../broadcast";
+import { clearParticipant, clearRoomPresence } from "../presence-store";
+import { hasDifferentLiveSocket } from "../socket-ownership";
 import { buildRoomState, notifyWaiting } from "../state";
 import { reconnectRejection } from "../reconnect-policy";
 
@@ -353,48 +355,60 @@ export async function detachSocket(
   const participant = ctx.participant;
   unregisterSocket(ctx);
   if (!roomId || !participant) return;
-
   const fresh = await getParticipant(roomId, participant.id);
   if (!fresh) {
+    clearParticipant(roomId, participant.id);
     ctx.unbind();
     return;
   }
 
   if (fresh.state === "WAITING") {
-    await removeParticipant(roomId, participant.id);
+    if (fresh.socketId === ctx.id) {
+      clearParticipant(roomId, participant.id);
+      await removeParticipant(roomId, participant.id);
+      await notifyWaiting(roomId);
+    }
     ctx.unbind();
-    await notifyWaiting(roomId);
     return;
   }
 
-  if (fresh.socketId === ctx.id) {
-    const next = await updateParticipant(
+  // A replacement socket may already own this participant, especially when it
+  // connected to a different gateway. A delayed close from the old socket must
+  // not erase the replacement's live presence or mark it as left. A null socket
+  // ID is not a live replacement, so stale snapshots still need cleanup.
+  if (hasDifferentLiveSocket(fresh.socketId, ctx.id)) {
+    ctx.unbind();
+    return;
+  }
+
+  clearParticipant(roomId, participant.id);
+  const next = await updateParticipant(
+    roomId,
+    participant.id,
+    {
+      socketId: null,
+      mic: false,
+      cam: false,
+      screen: false,
+      typing: false,
+      handRaised: false,
+      state: reason === "left" ? "LEFT" : fresh.state,
+      lastSeenAt: Date.now(),
+    },
+    { requireSocketId: ctx.id },
+  );
+  if (next) {
+    emit(
       roomId,
-      participant.id,
-      {
-        socketId: null,
-        mic: false,
-        cam: false,
-        screen: false,
-        typing: false,
-        handRaised: false,
-        state: reason === "left" ? "LEFT" : fresh.state,
-        lastSeenAt: Date.now(),
-      },
-      { requireSocketId: ctx.id },
+      "participant_left",
+      { participantId: participant.id, reason },
+      {},
     );
-    if (next) {
-      emit(
-        roomId,
-        "participant_left",
-        { participantId: participant.id, reason },
-        {},
-      );
-    }
   }
 
   ctx.unbind();
   if (roomSocketCount(roomId) === 0) {
+    clearRoomPresence(roomId);
     await scheduleRoomExpiry(roomId);
     log.info("room idle, ttl armed", { roomId });
   }

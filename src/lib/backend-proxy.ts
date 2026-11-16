@@ -52,10 +52,13 @@ export async function proxyToBackend(
   }
 
   const method = init?.method ?? request.method;
+  // Node's fetch requires `duplex: "half"` for streaming request bodies.
+  // Buffering the small JSON request avoids that runtime-specific constraint
+  // and keeps the proxy compatible with both Node and Cloudflare runtimes.
   const body =
     method === "GET" || method === "HEAD"
       ? undefined
-      : (init?.body ?? request.body);
+      : (init?.body ?? (await request.arrayBuffer()));
 
   try {
     const response = await fetch(`${origin}${path}`, {

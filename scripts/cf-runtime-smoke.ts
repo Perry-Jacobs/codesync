@@ -21,6 +21,7 @@ type ClientType =
   | "file_op"
   | "fs_bridge_attach"
   | "fs_file_content"
+  | "fs_ack"
   | "yjs_update"
   | "yjs_sync_request"
   | "leave_room";
@@ -200,35 +201,7 @@ async function verifyLocalFilesystemPrivacy(): Promise<void> {
     const reset = await host.waitFor("workspace_reset");
     const fileId = (reset.data.files as Array<{ fileId: string }>)[0].fileId;
 
-    guest.send("file_op", {
-      op: "open",
-      fileId,
-      path: "secret.txt",
-    });
-    const denied = await guest.waitFor(
-      "error",
-      (message) => message.data.code === "FORBIDDEN",
-    );
-    assert.equal(denied.data.code, "FORBIDDEN");
-
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    assert.equal(
-      host.hasMessage("fs_request", (message) => message.data.op === "read"),
-      false,
-      "unauthorized viewer must not trigger a host filesystem read",
-    );
-
-    host.send("host_action", {
-      action: "grant_edit",
-      targetId: guestParticipant.id,
-    });
-    await guest.waitFor(
-      "permission_changed",
-      (message) =>
-        message.data.participantId === guestParticipant.id &&
-        message.data.canEdit === true,
-    );
-
+    // Read-only viewers may open host files. Writes stay gated below.
     guest.send("file_op", {
       op: "open",
       fileId,
@@ -251,6 +224,51 @@ async function verifyLocalFilesystemPrivacy(): Promise<void> {
       (message) =>
         message.data.fileId === fileId && message.data.kind === "snapshot",
     );
+
+    guest.send("file_op", {
+      op: "create",
+      path: "viewer-write.txt",
+    });
+    const denied = await guest.waitFor(
+      "error",
+      (message) => message.data.code === "FORBIDDEN",
+    );
+    assert.equal(denied.data.code, "FORBIDDEN");
+    assert.equal(
+      host.hasMessage("fs_request", (message) => message.data.op === "create"),
+      false,
+      "unauthorized viewer must not trigger a host filesystem write",
+    );
+
+    host.send("host_action", {
+      action: "grant_edit",
+      targetId: guestParticipant.id,
+    });
+    await guest.waitFor(
+      "permission_changed",
+      (message) =>
+        message.data.participantId === guestParticipant.id &&
+        message.data.canEdit === true,
+    );
+
+    guest.send("file_op", {
+      op: "create",
+      path: "viewer-write.txt",
+    });
+    const createRequest = await host.waitFor(
+      "fs_request",
+      (message) => message.data.op === "create",
+    );
+    host.send("fs_ack", {
+      requestId: createRequest.data.requestId,
+      ok: true,
+    });
+    const writeChange = await guest.waitFor(
+      "file_changed",
+      (message) =>
+        (message.data.meta as { path?: string }).path === "viewer-write.txt",
+    );
+    assert.match((writeChange.data.meta as { fileId: string }).fileId, /^f_/);
   } finally {
     host.close();
     guest.close();
@@ -439,7 +457,7 @@ async function main() {
             "reconnect",
             "host_transfer",
             "end_session",
-            "local_filesystem_privacy",
+            "local_filesystem_read_only",
           ],
         },
         null,

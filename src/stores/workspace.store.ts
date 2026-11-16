@@ -2,6 +2,8 @@
 
 import { create } from "zustand";
 import type { FileMeta, WorkspaceMode } from "@/lib/ws-protocol";
+import { moveWorkspacePath } from "@/lib/workspace-paths";
+import { languageFromPath } from "@/utils/language";
 
 export interface OpenTab {
   fileId: string;
@@ -67,7 +69,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   setFiles: (files) => {
     const alive = new Set(files.map((file) => file.fileId));
-    const tabs = get().tabs.filter((tab) => alive.has(tab.fileId));
+    const tabs = get()
+      .tabs.filter((tab) => alive.has(tab.fileId))
+      .map((tab) => {
+        const file = files.find((entry) => entry.fileId === tab.fileId);
+        return file ? { ...tab, path: file.path } : tab;
+      });
     const active = get().activeFileId;
     set({
       files,
@@ -156,20 +163,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => {
       const files = state.files.map((file) => {
         if (meta && file.fileId === meta.fileId) return { ...meta, path: to };
-        if (file.path === from) return { ...file, path: to };
-        if (file.path.startsWith(`${from}/`)) {
-          return { ...file, path: `${to}${file.path.slice(from.length)}` };
-        }
-        return file;
+        const path = moveWorkspacePath(file.path, from, to);
+        return path === file.path
+          ? file
+          : {
+              ...file,
+              path,
+              lang:
+                file.kind === "file"
+                  ? meta?.fileId === file.fileId
+                    ? meta.lang
+                    : languageFromPath(path)
+                  : file.lang,
+            };
       });
       files.sort((a, b) => a.path.localeCompare(b.path));
       const tabs = state.tabs.map((tab) => {
         if (meta && tab.fileId === meta.fileId) return { ...tab, path: to };
-        if (tab.path === from) return { ...tab, path: to };
-        if (tab.path.startsWith(`${from}/`)) {
-          return { ...tab, path: `${to}${tab.path.slice(from.length)}` };
-        }
-        return tab;
+        const path = moveWorkspacePath(tab.path, from, to);
+        return path === tab.path ? tab : { ...tab, path };
       });
       return { files, tabs };
     }),

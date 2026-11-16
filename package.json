@@ -23,6 +23,7 @@
     "cf:backend:dev": "npm --prefix workers/codesync run dev",
     "cf:runtime:smoke": "tsx scripts/cf-runtime-smoke.ts",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test server/backend-bugs.test.ts server/ws/remote-presence.test.ts server/ws/socket-ownership.test.ts src/lib/buses.test.ts src/lib/webrtc/peerMesh.test.ts src/lib/chat-notification.test.ts src/lib/file-subscriptions.test.ts src/lib/presence-state.test.ts src/lib/workspace-paths.test.ts src/stores/workspace.store.test.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

@@ -47,8 +47,11 @@ export async function storeHostToken(
 }
 
 /**
- * Host tokens are bearer credentials, so they must be consumed atomically.
- * They are also bound to the participant that currently owns the host role.
+ * Host tokens are durable bearer credentials bound to the participant that
+ * currently owns the host role. They must stay valid for the life of the room:
+ * a host who reloads after losing the tab's reconnect token still needs to be
+ * able to reclaim the role. transfer_host rotates the stored token, so an old
+ * credential cannot be used after ownership changes.
  */
 export async function verifyHostToken(
   roomId: string,
@@ -56,25 +59,21 @@ export async function verifyHostToken(
   token: string | undefined,
 ): Promise<boolean> {
   if (!token) return false;
-  const result = await getRedis().eval(
-    `
-      local stored = redis.call('GET', KEYS[1])
-      if not stored then
-        return 0
-      end
-      local ok, record = pcall(cjson.decode, stored)
-      if not ok or record.participantId ~= ARGV[1] or record.tokenHash ~= ARGV[2] then
-        return 0
-      end
-      redis.call('DEL', KEYS[1])
-      return 1
-    `,
-    1,
-    keys.host(roomId),
-    participantId,
-    sha256(token),
-  );
-  return Number(result) === 1;
+  const stored = await getRedis().get(keys.host(roomId));
+  if (!stored) return false;
+  try {
+    const record = JSON.parse(stored) as {
+      participantId?: unknown;
+      tokenHash?: unknown;
+    };
+    return (
+      record.participantId === participantId &&
+      typeof record.tokenHash === "string" &&
+      safeEqual(record.tokenHash, sha256(token))
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function invalidateHostToken(roomId: string): Promise<void> {
@@ -136,7 +135,9 @@ export async function verifyReconnectToken(
       typeof payload.role === "string" ? (payload.role as Role) : null;
     const jti = payload.jti;
     if (!participantId || !roomId || !role || !jti) return null;
-    const known = await getRedis().getdel(keys.reconnect(jti));
+    // Kept alive for the token lifetime so reconnect survives a brief network
+    // drop, including a drop before the replacement token reaches the client.
+    const known = await getRedis().get(keys.reconnect(jti));
     if (!known) return null;
     let stored: { roomId?: unknown; participantId?: unknown };
     try {

@@ -29,6 +29,8 @@ import { hasCapability } from "@/lib/acl";
 import {
   ancestorPaths,
   buildFileTree,
+  canMoveEntryToDirectory,
+  directoryPaths as getDirectoryPaths,
   isValidEntryName,
   joinPath,
   type TreeNode,
@@ -49,15 +51,20 @@ function parentOf(path: string): string {
   return path.split("/").filter(Boolean).slice(0, -1).join("/");
 }
 
-export function FileTree({ host }: { host: HostWorkspaceApi }) {
+export function FileTree({
+  host,
+  onFileOpen,
+}: {
+  host: HostWorkspaceApi;
+  onFileOpen?: () => void;
+}) {
   const { send } = useSession();
   const files = useWorkspaceStore((state) => state.files);
   const activeFileId = useWorkspaceStore((state) => state.activeFileId);
   const openFile = useWorkspaceStore((state) => state.openFile);
   const self = useRoomStore((state) => state.self);
-  const mode = useWorkspaceStore((state) => state.mode);
+  const workspaceRevision = useWorkspaceStore((state) => state.revision);
   const canEdit = hasCapability(self, "edit_code");
-  const canOpenLocalFiles = mode !== "local-fs" || canEdit;
   const isHost = self?.role === "HOST";
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -66,21 +73,34 @@ export function FileTree({ host }: { host: HostWorkspaceApi }) {
   const [nameInput, setNameInput] = useState("");
   const [dragPath, setDragPath] = useState<string | null>(null);
   const nameInputId = useId();
-  const initialized = useRef(false);
+  const initializedRevision = useRef<number | null>(null);
 
   const tree = useMemo(() => buildFileTree(files), [files]);
+  const directoryPaths = useMemo(() => getDirectoryPaths(tree), [tree]);
   const activeFile = files.find((file) => file.fileId === activeFileId) ?? null;
 
-  // First load: open every folder so the workspace is visible at a glance.
+  // First load and each workspace replacement: open every folder so the
+  // workspace is visible at a glance instead of inheriting stale tree state.
   useEffect(() => {
-    if (initialized.current || files.length === 0) return;
-    initialized.current = true;
-    setExpanded(
-      new Set(
-        files.filter((file) => file.kind === "dir").map((file) => file.path),
-      ),
-    );
-  }, [files]);
+    if (files.length === 0) {
+      initializedRevision.current = null;
+      setExpanded(new Set());
+      return;
+    }
+    if (initializedRevision.current === workspaceRevision) return;
+    initializedRevision.current = workspaceRevision;
+    setExpanded(new Set(directoryPaths));
+  }, [directoryPaths, files.length, workspaceRevision]);
+
+  // Moves and deletes can invalidate paths while keeping the same workspace.
+  useEffect(() => {
+    setExpanded((previous) => {
+      const next = new Set(
+        [...previous].filter((path) => directoryPaths.has(path)),
+      );
+      return next.size === previous.size ? previous : next;
+    });
+  }, [directoryPaths]);
 
   // Keep the active file's ancestors open.
   useEffect(() => {
@@ -107,16 +127,13 @@ export function FileTree({ host }: { host: HostWorkspaceApi }) {
       return;
     }
     if (!node.meta) return;
-    if (!canOpenLocalFiles) {
-      toast.error("The host has not granted you access to this local folder");
-      return;
-    }
     openFile({ fileId: node.meta.fileId, path: node.meta.path });
     send("file_op", {
       op: "open",
       fileId: node.meta.fileId,
       path: node.meta.path,
     });
+    onFileOpen?.();
   };
 
   const startDialog = (mode: FileDialogMode, target: string): void => {
@@ -168,9 +185,7 @@ export function FileTree({ host }: { host: HostWorkspaceApi }) {
   };
 
   const moveTo = (from: string, targetDir: string): void => {
-    if (!canEdit || !from) return;
-    if (from === targetDir) return;
-    if (targetDir && from.startsWith(`${targetDir}/`)) return;
+    if (!canEdit || !canMoveEntryToDirectory(from, targetDir)) return;
     const toPath = joinPath(targetDir, baseName(from));
     if (toPath === from) return;
     send("file_op", { op: "move", path: from, toPath });
