@@ -10,7 +10,9 @@ export function Toaster() {
 
   // On compact widths the side rail and waiting room are bottom-heavy sheets.
   // Bottom-right toasts land on top of the chat composer and the waiting-room
-  // switches, so move them to the top-right, just below the top bar.
+  // switches, so move them to the top-right, just below the top bar. On
+  // desktop the video dock owns the bottom-right corner; keep toasts above its
+  // 44px toolbar so a chat notification never covers Leave or the composer.
   useEffect(() => {
     const query = window.matchMedia("(max-width: 767px)");
     const update = (): void => setCompact(query.matches);
@@ -24,7 +26,9 @@ export function Toaster() {
       theme={theme}
       position={compact ? "top-right" : "bottom-right"}
       offset={
-        compact ? { top: 56, right: 12, bottom: 16, left: 12 } : undefined
+        compact
+          ? { top: 56, right: 12, bottom: 16, left: 12 }
+          : { bottom: 72, right: 12 }
       }
       closeButton
       richColors
