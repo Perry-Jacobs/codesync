@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { MicOff, MonitorUp } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Maximize2, MicOff, Minimize2, MonitorUp } from "lucide-react";
 import { cn, initials } from "@/lib/utils";
 import { safeParticipantColor } from "@/utils/color";
 
@@ -13,6 +13,8 @@ interface VideoTileProps {
   micOn: boolean;
   screenSharing?: boolean;
   camOff?: boolean;
+  /** Shows a control that fullscreens just this tile (screen shares). */
+  fullscreenable?: boolean;
   className?: string;
 }
 
@@ -24,11 +26,38 @@ export function VideoTile({
   micOn,
   screenSharing,
   camOff,
+  fullscreenable = false,
   className,
 }: VideoTileProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const safeColor = safeParticipantColor(color);
   const hasVideo = Boolean(stream?.getVideoTracks().length) && !camOff;
+
+  useEffect(() => {
+    if (!fullscreenable) return;
+    const onChange = (): void => {
+      setIsFullscreen(document.fullscreenElement === containerRef.current);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, [fullscreenable]);
+
+  const toggleFullscreen = async (): Promise<void> => {
+    const element = containerRef.current;
+    if (!element) return;
+    try {
+      if (document.fullscreenElement === element) {
+        await document.exitFullscreen();
+      } else {
+        await element.requestFullscreen();
+      }
+    } catch {
+      // The browser can refuse fullscreen outside a user gesture; the tile
+      // simply stays inline in that case.
+    }
+  };
 
   useEffect(() => {
     const element = videoRef.current;
@@ -40,8 +69,11 @@ export function VideoTile({
 
   return (
     <div
+      ref={containerRef}
       className={cn(
         "group relative aspect-video w-[132px] shrink-0 overflow-hidden rounded-lg border border-border bg-black/50",
+        fullscreenable &&
+          "[&:fullscreen]:aspect-auto [&:fullscreen]:h-screen [&:fullscreen]:w-screen [&:fullscreen]:rounded-none [&:fullscreen]:border-0",
         className,
       )}
     >
@@ -70,6 +102,22 @@ export function VideoTile({
             {initials(name)}
           </span>
         </div>
+      ) : null}
+      {fullscreenable ? (
+        <button
+          type="button"
+          onClick={() => void toggleFullscreen()}
+          aria-label={
+            isFullscreen ? "Exit fullscreen" : "Fullscreen shared screen"
+          }
+          className="absolute right-1.5 top-1.5 z-10 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-white/90 shadow-sm backdrop-blur-sm transition-colors hover:bg-black/80 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          {isFullscreen ? (
+            <Minimize2 className="h-3.5 w-3.5" />
+          ) : (
+            <Maximize2 className="h-3.5 w-3.5" />
+          )}
+        </button>
       ) : null}
       <div className="absolute inset-x-0 bottom-0 flex items-center gap-1 bg-gradient-to-t from-black/80 to-transparent px-1.5 py-1">
         <span className="truncate text-[9px] font-medium text-white/90">

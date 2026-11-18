@@ -38,6 +38,7 @@ import {
 } from "@/lib/buses";
 import { toPresenceEvent } from "@/lib/presence-events";
 import { ChatNotificationGate } from "@/lib/chat-notification";
+import { resetClientDocs } from "@/lib/yjs/client";
 
 type ConnectOptions = Partial<JoinCredentials> & {
   displayName?: string;
@@ -337,6 +338,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           break;
         }
         case "workspace_reset": {
+          // The gateway discards every document when the host folder is
+          // attached or reloaded. Drop our cached copies too so the fresh
+          // disk snapshot cannot merge with the previous Yjs history.
+          resetClientDocs();
           workspace.reset(
             message.data.files,
             message.data.mode,

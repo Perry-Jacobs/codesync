@@ -119,6 +119,7 @@ export function MediaGallery({ fullscreen = false }: { fullscreen?: boolean }) {
             isSelf={false}
             micOn={participant.mic}
             screenSharing
+            fullscreenable
             className={
               fullscreen
                 ? tileClass
@@ -134,6 +135,7 @@ export function MediaGallery({ fullscreen = false }: { fullscreen?: boolean }) {
             isSelf
             micOn={micEnabled}
             screenSharing
+            fullscreenable
             className={
               fullscreen
                 ? tileClass

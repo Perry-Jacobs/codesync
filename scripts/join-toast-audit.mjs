@@ -114,6 +114,16 @@ async function observeToasts(page, durationMs = 4_000) {
   return observedToasts;
 }
 
+/** Polls until the expression is true so slow dev-server compiles do not flake. */
+async function waitForExpression(page, expression, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await page.evaluate(expression)) return true;
+    await sleep(200);
+  }
+  return false;
+}
+
 async function main() {
   const room = await createRoom();
   const chromeOptions = (debugPort, suffix) => [
@@ -144,7 +154,8 @@ async function main() {
 
     await page.navigate(`${APP}/room/${room.roomKey}`);
     const hostToasts = await observeToasts(page);
-    const roomVisible = await page.evaluate(
+    const roomVisible = await waitForExpression(
+      page,
       `document.body.textContent.includes('Join toast audit')`,
     );
 
@@ -184,7 +195,8 @@ async function main() {
     }
     const guestClicked = guestClickState.found && !guestClickState.disabled;
     const guestToasts = await observeToasts(guestPage);
-    const guestRoomVisible = await guestPage.evaluate(
+    const guestRoomVisible = await waitForExpression(
+      guestPage,
       `location.pathname.startsWith('/room/') && document.body.textContent.includes('Join toast audit')`,
     );
 

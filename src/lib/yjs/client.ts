@@ -1,6 +1,6 @@
-'use client';
+"use client";
 
-import * as Y from 'yjs';
+import * as Y from "yjs";
 
 interface Entry {
   doc: Y.Doc;
@@ -31,6 +31,19 @@ export function releaseClientDoc(fileId: string): void {
   entry.lastUsed = Date.now();
 }
 
+/**
+ * Drops every cached client document. The gateway recreates documents from the
+ * host's disk whenever a local folder is attached or reloaded, so keeping a
+ * document across a workspace reset would merge two independent histories and
+ * duplicate its text.
+ */
+export function resetClientDocs(): void {
+  for (const entry of docs.values()) {
+    if (entry.refs === 0) entry.doc.destroy();
+  }
+  docs.clear();
+}
+
 export function getClientDoc(fileId: string): Y.Doc | null {
   return docs.get(fileId)?.doc ?? null;
 }
@@ -49,7 +62,7 @@ function evict(): void {
 }
 
 export function toBase64(bytes: Uint8Array): string {
-  let binary = '';
+  let binary = "";
   const chunk = 0x8000;
   for (let index = 0; index < bytes.length; index += chunk) {
     binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
@@ -75,5 +88,5 @@ export function encodeStateVector(doc: Y.Doc): string {
 }
 
 export function applyRemoteUpdate(doc: Y.Doc, update: string): void {
-  Y.applyUpdate(doc, fromBase64(update), 'remote');
+  Y.applyUpdate(doc, fromBase64(update), "remote");
 }

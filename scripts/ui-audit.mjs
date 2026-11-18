@@ -167,28 +167,42 @@ async function clickButton(page, description, expression) {
 
 async function createFiles(page) {
   for (const name of FILE_NAMES) {
-    await clickButton(
-      page,
-      "New file",
-      `(button.innerHTML || '').includes('lucide-plus')`,
-    );
-    await page.evaluate(`(() => {
-      const dialog = [...document.querySelectorAll('[role="dialog"]')].find(
-        (node) => node.getClientRects().length > 0,
+    let created = false;
+    for (let attempt = 0; attempt < 3 && !created; attempt += 1) {
+      await clickButton(
+        page,
+        "New file",
+        `(button.innerHTML || '').includes('lucide-plus')`,
       );
-      const input = dialog?.querySelector('input');
-      if (!input) return false;
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(input, ${JSON.stringify(name)});
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      return true;
-    })()`);
-    await clickButton(
-      page,
-      "Create",
-      `[...document.querySelectorAll('[role="dialog"]')].some((dialog) => dialog.contains(button)) && (button.textContent || '').trim() === 'Create'`,
-    );
-    await sleep(120);
+      // Fill the name and submit in one DOM pass so a slow dialog animation
+      // cannot leave the audit clicking a create button that is not mounted.
+      created = await page.evaluate(`(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        for (let tick = 0; tick < 20; tick += 1) {
+          const dialog = [...document.querySelectorAll('[role="dialog"]')].find(
+            (node) => node.getClientRects().length > 0 && node.innerText.includes('New file'),
+          );
+          const input = dialog?.querySelector('input');
+          const create = dialog
+            ? [...dialog.querySelectorAll('button')].find(
+                (button) => (button.textContent || '').trim() === 'Create',
+              )
+            : null;
+          if (dialog && input && create) {
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+            setter.call(input, ${JSON.stringify(name)});
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            await wait(50);
+            create.click();
+            return true;
+          }
+          await wait(100);
+        }
+        return false;
+      })()`);
+      if (created) await sleep(400);
+    }
+    if (!created) throw new Error(`Could not create ${name}`);
   }
 }
 
@@ -316,6 +330,15 @@ async function main() {
     await sleep(4500);
     await setMobile(page, 390, 844);
     report.screenshots.push(await page.screenshot("codesync-room-host-mobile"));
+    // A fresh joiner toast sits over the top bar on narrow screens; wait for it
+    // to clear so the audit clicks the real control under the overlay.
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const covered = await page.evaluate(
+        `[...document.querySelectorAll('[data-sonner-toast]')].some((node) => node.getClientRects().length > 0)`,
+      );
+      if (!covered) break;
+      await sleep(300);
+    }
     await clickButton(
       page,
       "mobile people panel",

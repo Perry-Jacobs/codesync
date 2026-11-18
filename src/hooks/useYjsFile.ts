@@ -12,6 +12,7 @@ import {
   releaseClientDoc,
 } from "@/lib/yjs/client";
 import { useRoomStore } from "@/stores/room.store";
+import { useWorkspaceStore } from "@/stores/workspace.store";
 
 export interface YjsFileHandle {
   doc: Y.Doc | null;
@@ -40,16 +41,19 @@ export function useYjsFile(
   const connection = useRoomStore((state) => state.connection);
   const [state, setState] = useState<DocState | null>(null);
   const [synced, setSynced] = useState(false);
+  const workspaceRevision = useWorkspaceStore((state) => state.revision);
 
   useEffect(() => {
     if (!fileId) return;
+    // A workspace reset replaces every gateway document (host folder attach or
+    // reload), so a cached document must never be reused across revisions.
     const doc = acquireClientDoc(fileId);
     setState({ fileId, doc });
     setSynced(false);
     return () => {
       releaseClientDoc(fileId);
     };
-  }, [fileId]);
+  }, [fileId, workspaceRevision]);
 
   const doc = state && state.fileId === fileId ? state.doc : null;
   const text = useMemo(() => doc?.getText("content") ?? null, [doc]);
