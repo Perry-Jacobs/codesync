@@ -6,6 +6,7 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import {
   ArrowRight,
+  ArrowUpRight,
   Check,
   Code2,
   FileCode2,
@@ -309,13 +310,67 @@ export function LandingPage() {
         </section>
       </main>
 
-      <footer className="relative z-10 border-t border-border py-6 px-4 text-center text-xs text-muted-foreground">
-        <p className="font-medium text-foreground">Created by Perry Jacobs</p>
-        <p className="mx-auto mt-1 max-w-2xl leading-relaxed">
-          A real-time coding workspace for shared editing, chat, video, and
-          collaboration—built with Next.js, Yjs, WebRTC, and Cloudflare Durable
-          Objects.
-        </p>
+      <footer className="relative z-10 border-t border-border bg-background">
+        <div className="mx-auto grid max-w-6xl gap-10 px-6 py-12 md:grid-cols-[1.6fr_1fr]">
+          <div>
+            <Link href="/" className="inline-flex items-center gap-2.5">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-sky-400 to-indigo-500 text-zinc-950 shadow-sm">
+                <Code2 className="h-4 w-4" />
+              </span>
+              <span className="text-[15px] font-semibold tracking-tight">
+                CodeSync
+              </span>
+            </Link>
+            <p className="mt-4 max-w-xs text-sm leading-6 text-muted-foreground">
+              A real-time coding workspace for shared editing, chat, video, and
+              screen share.
+            </p>
+          </div>
+
+          <div>
+            <h2 className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+              Workspace
+            </h2>
+            <ul className="mt-4 space-y-2.5">
+              <li>
+                <button
+                  type="button"
+                  onClick={() => setStartOpen(true)}
+                  className="text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  Start a session
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  onClick={() => setJoinOpen(true)}
+                  className="text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  Join with a key
+                </button>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/Perry-Jacobs/codesync"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  GitHub
+                  <ArrowUpRight className="h-3.5 w-3.5" />
+                </a>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <div className="border-t border-border">
+          <div className="mx-auto flex max-w-6xl flex-col gap-2 px-6 py-5 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+            <p>Created by Perry Jacobs</p>
+            <p>Built with Next.js, Yjs, WebRTC, and Cloudflare.</p>
+          </div>
+        </div>
       </footer>
 
       <Dialog open={startOpen} onOpenChange={setStartOpen}>
