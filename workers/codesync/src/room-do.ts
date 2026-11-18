@@ -1158,9 +1158,11 @@ export class RoomDurableObject {
     this.clearAllFileSubscriptions();
     this.clearAllPresence();
     const previous = await this.listFiles();
-    const byPath = new Map(previous.map((entry) => [entry.path, entry]));
+    // A folder attach starts a new workspace generation. Fresh file ids keep
+    // stale clients from merging their previous Yjs history into the documents
+    // that are about to be seeded from disk (which would duplicate file text).
     const files = data.snapshot.slice(0, 600).map((entry) => ({
-      fileId: byPath.get(entry.path)?.fileId ?? `f_${randomToken(16)}`,
+      fileId: `f_${randomToken(16)}`,
       path: entry.path,
       kind: entry.kind,
       size: entry.size,

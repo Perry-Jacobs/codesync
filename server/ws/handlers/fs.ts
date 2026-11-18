@@ -267,13 +267,13 @@ export async function handleBridgeAttach(
     return;
   }
 
-  const previous = await listFiles(room.id);
-  const byPath = new Map(previous.map((entry) => [entry.path, entry]));
   const snapshot = data.snapshot.slice(0, MAX_FILES);
+  // A folder attach starts a new workspace generation. Fresh file ids keep
+  // stale clients from merging their previous Yjs history into the documents
+  // that are about to be seeded from disk (which would duplicate file text).
   const nextFiles: FileMeta[] = snapshot.map((entry) => {
-    const existing = byPath.get(entry.path);
     return {
-      fileId: existing?.fileId ?? newId("f"),
+      fileId: newId("f"),
       path: entry.path,
       kind: entry.kind,
       size: entry.size,
