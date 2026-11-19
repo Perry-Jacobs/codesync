@@ -6,7 +6,6 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import {
   ArrowRight,
-  ArrowUpRight,
   Check,
   Code2,
   FileCode2,
@@ -349,17 +348,6 @@ export function LandingPage() {
                 >
                   Join with a key
                 </button>
-              </li>
-              <li>
-                <a
-                  href="https://github.com/Perry-Jacobs/codesync"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  GitHub
-                  <ArrowUpRight className="h-3.5 w-3.5" />
-                </a>
               </li>
             </ul>
           </div>
