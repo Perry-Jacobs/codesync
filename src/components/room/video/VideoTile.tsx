@@ -142,7 +142,6 @@ export function RemoteAudio({ stream }: { stream: MediaStream }) {
     const audio = ref.current;
     if (!audio) return;
     let cancelled = false;
-    let waitingForGesture = false;
 
     function cleanupGesture(): void {
       document.removeEventListener("pointerdown", retry, true);
@@ -150,19 +149,6 @@ export function RemoteAudio({ stream }: { stream: MediaStream }) {
       document.removeEventListener("keydown", retry, true);
       document.removeEventListener("touchend", retry, true);
       document.removeEventListener("visibilitychange", onVisibility);
-      waitingForGesture = false;
-    }
-
-    function waitForGesture(): void {
-      if (cancelled || waitingForGesture) return;
-      waitingForGesture = true;
-      // `pointerdown` is usually early enough, but `click` is the event
-      // browsers most reliably treat as activation for media playback.
-      document.addEventListener("pointerdown", retry, true);
-      document.addEventListener("click", retry, true);
-      document.addEventListener("keydown", retry, true);
-      document.addEventListener("touchend", retry, true);
-      document.addEventListener("visibilitychange", onVisibility);
     }
 
     function onVisibility(): void {
@@ -170,31 +156,21 @@ export function RemoteAudio({ stream }: { stream: MediaStream }) {
     }
 
     function retry(): void {
-      if (cancelled) return;
-      cleanupGesture();
-      void attemptPlayback();
+      if (!cancelled) void attemptPlayback();
     }
 
     async function attemptPlayback(): Promise<void> {
-      if (cancelled) return;
-      const element = audio;
-      if (!element) return;
+      if (cancelled || !audio) return;
       try {
         // Browsers reject unmuted autoplay until the document has user
-        // activation. Retry on the next interaction instead of silently
-        // leaving the call mute; the element stays mounted so playback
-        // starts as soon as the gesture arrives.
-        await element.play();
+        // activation. Keep the listeners installed until playback actually
+        // succeeds: a gesture can dispatch several events in one task
+        // (pointerdown → click) and the click must not race the rejection
+        // from the pointerdown attempt.
+        await audio.play();
         cleanupGesture();
-      } catch (error) {
-        if (cancelled) return;
-        if (process.env.NODE_ENV !== "production") {
-          console.warn(
-            "[codesync] Remote audio is waiting for user activation",
-            error,
-          );
-        }
-        waitForGesture();
+      } catch {
+        // Stay subscribed; the next interaction or visibility change retries.
       }
     }
 
@@ -205,6 +181,11 @@ export function RemoteAudio({ stream }: { stream: MediaStream }) {
       if (event.track.kind === "audio") void attemptPlayback();
     }
 
+    document.addEventListener("pointerdown", retry, true);
+    document.addEventListener("click", retry, true);
+    document.addEventListener("keydown", retry, true);
+    document.addEventListener("touchend", retry, true);
+    document.addEventListener("visibilitychange", onVisibility);
     stream.addEventListener("addtrack", onAddTrack);
     audio.srcObject = stream;
     void attemptPlayback();
