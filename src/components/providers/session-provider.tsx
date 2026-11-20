@@ -145,6 +145,30 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       const ui = useUiStore.getState();
       const { roomKey: key, pathname: path } = routeRef.current;
 
+      /**
+       * A guest who pressed unmute before the host granted speak was waiting
+       * on that request. Once the grant lands, start capture automatically
+       * instead of making them press the same button again.
+       */
+      const applySpeakAccess = (
+        self: { canSpeak: boolean },
+        resendPendingRequest: boolean,
+      ): void => {
+        const current = useMediaStore.getState();
+        if (self.canSpeak) {
+          if (!current.speakRequested) return;
+          current.setSpeakRequested(false);
+          current.setMicEnabled(true);
+          toast.success("You can speak now — your microphone is on", {
+            id: "speak-granted",
+          });
+          return;
+        }
+        if (resendPendingRequest && current.speakRequested) {
+          send("request_speak", { enabled: true });
+        }
+      };
+
       switch (message.type) {
         case "room_state": {
           room.applyRoomState(message.data);
@@ -156,6 +180,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           media.setMicEnabled(message.data.self.mic);
           media.setCamEnabled(message.data.self.cam);
           media.setScreenSharing(message.data.self.screen);
+          applySpeakAccess(message.data.self, false);
           break;
         }
         case "admitted": {
@@ -170,6 +195,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           hostFallbackRef.current = false;
           media.setMicEnabled(message.data.self.mic);
           media.setCamEnabled(message.data.self.cam);
+          applySpeakAccess(message.data.self, true);
           const firstAdmission = room.status !== "admitted";
           room.setStatus("admitted");
           if (path.startsWith("/join/") && key) {
@@ -284,12 +310,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
             });
           }
           if (room.self?.id === message.data.participantId) {
-            const access = message.data.canEdit
-              ? "You can edit files."
-              : "Files are read-only for you.";
-            toast.message("Permissions updated", {
-              description: `Role: ${message.data.role.toLowerCase()}. ${access}`,
-            });
+            const current = useMediaStore.getState();
+            if (!message.data.canSpeak) {
+              current.setSpeakRequested(false);
+              if (current.micEnabled) current.setMicEnabled(false);
+            }
+            if (message.data.canSpeak && current.speakRequested) {
+              applySpeakAccess({ canSpeak: true }, false);
+            } else {
+              const access = message.data.canEdit
+                ? "You can edit files."
+                : "Files are read-only for you.";
+              const speak = message.data.canSpeak ? " You can speak now." : "";
+              toast.message("Permissions updated", {
+                description: `Role: ${message.data.role.toLowerCase()}. ${access}${speak}`,
+              });
+            }
           }
           break;
         }
@@ -465,6 +501,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           }
           if (action === "mute" && targetId === room.self?.id) {
             media.setMicEnabled(false);
+            media.setSpeakRequested(false);
             toast.warning("The host muted you");
           }
           if (action === "ask_unmute" && targetId === room.self?.id) {

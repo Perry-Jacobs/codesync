@@ -47,6 +47,7 @@ export interface WebRtcApi {
   screenSharing: boolean;
   canShareScreen: boolean;
   permissionError: string | null;
+  speakRequested: boolean;
   toggleMic(): void;
   toggleCam(): void;
   toggleScreen(): Promise<void>;
@@ -65,6 +66,7 @@ export function useWebRTC(): WebRtcApi {
   const screenSharing = useMediaStore((state) => state.screenSharing);
   const permissionError = useMediaStore((state) => state.permissionError);
   const localStream = useMediaStore((state) => state.localStream);
+  const speakRequested = useMediaStore((state) => state.speakRequested);
 
   const [iceServers, setIceServers] = useState<RTCIceServer[] | null>(null);
   // The preview stream is mutated in place when tracks are added or removed,
@@ -82,6 +84,7 @@ export function useWebRTC(): WebRtcApi {
   const screenRef = useRef<MediaStreamTrack | null>(null);
   const screenRequestRef = useRef(0);
   const screenCapturePendingRef = useRef(false);
+  const lastSpeakRequestRef = useRef(0);
   const pendingSignalsRef = useRef<Array<ServerPayloads["webrtc_signal"]>>([]);
   const selfId = self?.id ?? null;
 
@@ -244,6 +247,9 @@ export function useWebRTC(): WebRtcApi {
             return;
           }
           audioRef.current = track;
+          // Hint the encoder for voice; Chrome otherwise treats microphone
+          // audio as generic and can apply a lower-quality profile.
+          track.contentHint = "speech";
           stream?.addTrack(track);
           track.onended = () => useMediaStore.getState().setMicEnabled(false);
           void meshRef.current?.setAudioTrack(track);
@@ -380,18 +386,31 @@ export function useWebRTC(): WebRtcApi {
   }, []);
 
   const requestSpeak = useCallback(() => {
+    const media = useMediaStore.getState();
+    const now = Date.now();
+    // Let a waiting guest nudge the host again, but do not let repeated
+    // clicks turn into a stream of toast prompts.
+    if (media.speakRequested && now - lastSpeakRequestRef.current < 4_000) {
+      toast.info("Your request is already with the host");
+      return;
+    }
+    media.setSpeakRequested(true);
+    lastSpeakRequestRef.current = now;
     send("request_speak", { enabled: true });
-    toast.info("Asked the host for speak access");
+    toast.info(
+      media.speakRequested
+        ? "Asked the host again for speak access"
+        : "Asked the host for speak access",
+    );
   }, [send]);
 
   const toggleMic = useCallback(() => {
+    const media = useMediaStore.getState();
     if (!self?.canSpeak) {
       requestSpeak();
       return;
     }
-    useMediaStore
-      .getState()
-      .setMicEnabled(!useMediaStore.getState().micEnabled);
+    media.setMicEnabled(!media.micEnabled);
   }, [requestSpeak, self?.canSpeak]);
 
   const toggleCam = useCallback(() => {
@@ -479,6 +498,7 @@ export function useWebRTC(): WebRtcApi {
     screenSharing,
     canShareScreen,
     permissionError,
+    speakRequested,
     toggleMic,
     toggleCam,
     toggleScreen,

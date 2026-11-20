@@ -1,13 +1,9 @@
-'use client';
+"use client";
 
-import { create } from 'zustand';
+import { create } from "zustand";
 
 export type PeerConnectionState =
-  | 'new'
-  | 'connecting'
-  | 'connected'
-  | 'disconnected'
-  | 'failed';
+  "new" | "connecting" | "connected" | "disconnected" | "failed";
 
 interface MediaState {
   micEnabled: boolean;
@@ -19,6 +15,8 @@ interface MediaState {
   screenStream: MediaStream | null;
   speaking: boolean;
   permissionError: string | null;
+  /** True between asking the host for speak access and the host answering. */
+  speakRequested: boolean;
   setMicEnabled(enabled: boolean): void;
   setCamEnabled(enabled: boolean): void;
   setScreenSharing(sharing: boolean): void;
@@ -29,6 +27,7 @@ interface MediaState {
   removePeer(participantId: string): void;
   setSpeaking(speaking: boolean): void;
   setPermissionError(error: string | null): void;
+  setSpeakRequested(requested: boolean): void;
   reset(): void;
 }
 
@@ -42,6 +41,7 @@ export const useMediaStore = create<MediaState>((set) => ({
   peerStates: {},
   speaking: false,
   permissionError: null,
+  speakRequested: false,
 
   setMicEnabled: (micEnabled) => set({ micEnabled }),
   setCamEnabled: (camEnabled) => set({ camEnabled }),
@@ -58,7 +58,9 @@ export const useMediaStore = create<MediaState>((set) => ({
     }),
 
   setPeerState: (participantId, peerState) =>
-    set((state) => ({ peerStates: { ...state.peerStates, [participantId]: peerState } })),
+    set((state) => ({
+      peerStates: { ...state.peerStates, [participantId]: peerState },
+    })),
 
   removePeer: (participantId) =>
     set((state) => {
@@ -71,6 +73,7 @@ export const useMediaStore = create<MediaState>((set) => ({
 
   setSpeaking: (speaking) => set({ speaking }),
   setPermissionError: (permissionError) => set({ permissionError }),
+  setSpeakRequested: (speakRequested) => set({ speakRequested }),
 
   reset: () =>
     set({
@@ -83,5 +86,6 @@ export const useMediaStore = create<MediaState>((set) => ({
       peerStates: {},
       speaking: false,
       permissionError: null,
+      speakRequested: false,
     }),
 }));

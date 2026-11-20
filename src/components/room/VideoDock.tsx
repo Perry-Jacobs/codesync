@@ -83,6 +83,7 @@ export function VideoDock({ webrtc, galleryVisible }: VideoDockProps) {
     screenSharing,
     canShareScreen,
     permissionError,
+    speakRequested,
     toggleMic,
     toggleCam,
     toggleScreen,
@@ -323,9 +324,21 @@ export function VideoDock({ webrtc, galleryVisible }: VideoDockProps) {
             <Button
               variant={micEnabled ? "secondary" : "ghost"}
               size="icon-sm"
-              className={cn("h-8 w-8", micEnabled && "text-emerald-400")}
+              className={cn(
+                "h-8 w-8",
+                micEnabled && "text-emerald-400",
+                speakRequested &&
+                  !self?.canSpeak &&
+                  "animate-pulse text-amber-400",
+              )}
               onClick={toggleMic}
-              aria-label={micEnabled ? "Mute microphone" : "Unmute microphone"}
+              aria-label={
+                speakRequested && !self?.canSpeak
+                  ? "Waiting for speak access"
+                  : micEnabled
+                    ? "Mute microphone"
+                    : "Unmute microphone"
+              }
             >
               {micEnabled ? (
                 <Mic className="h-4 w-4" />
@@ -339,7 +352,9 @@ export function VideoDock({ webrtc, galleryVisible }: VideoDockProps) {
               ? micEnabled
                 ? "Mute (hold Space to talk)"
                 : "Unmute (hold Space to talk)"
-              : "Ask the host for speak access"}
+              : speakRequested
+                ? "Waiting for the host to grant speak access"
+                : "Ask the host for speak access"}
           </TooltipContent>
         </Tooltip>
 

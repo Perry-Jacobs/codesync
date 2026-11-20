@@ -12,7 +12,15 @@ interface PeerEntry {
   ignoreOffer: boolean;
   remoteStream: MediaStream;
   pendingCandidates: RTCIceCandidateInit[];
+  restartAttempts: number;
+  restartTimer: ReturnType<typeof setTimeout> | null;
+  failureReported: boolean;
 }
+
+/** Let a transient ICE drop recover before paying for a restart. */
+const DISCONNECTED_GRACE_MS = 2_500;
+/** Keep retrying a dead media path for roughly half a minute. */
+const MAX_ICE_RESTARTS = 4;
 
 export interface PeerMeshOptions {
   iceServers: RTCIceServer[];
@@ -60,6 +68,9 @@ export class PeerMesh {
       ignoreOffer: false,
       remoteStream,
       pendingCandidates: [],
+      restartAttempts: 0,
+      restartTimer: null,
+      failureReported: false,
     };
     this.peers.set(peerId, entry);
 
@@ -132,13 +143,91 @@ export class PeerMesh {
     };
 
     pc.onconnectionstatechange = () => {
-      this.options.onStateChange(peerId, pc.connectionState);
-      if (pc.connectionState === "failed") {
+      const state = pc.connectionState;
+      this.options.onStateChange(peerId, state);
+      if (state === "connected") {
+        entry.restartAttempts = 0;
+        entry.failureReported = false;
+        this.clearRestartTimer(entry);
+        return;
+      }
+      if (state !== "failed" && state !== "disconnected") return;
+      // Only the deterministic offerer restarts ICE, keeping the pair free of
+      // glare. The answerer follows the new ufrag in the offer.
+      if (entry.polite) return;
+      this.scheduleIceRestart(
+        peerId,
+        entry,
+        state === "failed" ? 0 : DISCONNECTED_GRACE_MS,
+      );
+    };
+  }
+
+  private isConnected(entry: PeerEntry): boolean {
+    return entry.pc.connectionState === "connected";
+  }
+
+  private clearRestartTimer(entry: PeerEntry): void {
+    if (!entry.restartTimer) return;
+    clearTimeout(entry.restartTimer);
+    entry.restartTimer = null;
+  }
+
+  private scheduleIceRestart(
+    peerId: string,
+    entry: PeerEntry,
+    delayMs: number,
+  ): void {
+    if (this.isConnected(entry)) return;
+    if (entry.restartAttempts >= MAX_ICE_RESTARTS) {
+      if (!entry.failureReported) {
+        entry.failureReported = true;
         this.options.onError?.(
           "Media connection failed — check the TURN server",
         );
       }
-    };
+      return;
+    }
+    // A failed connection should not wait behind a pending grace timer.
+    if (entry.restartTimer) {
+      if (delayMs > 0) return;
+      this.clearRestartTimer(entry);
+    }
+    entry.restartTimer = setTimeout(() => {
+      entry.restartTimer = null;
+      void this.performIceRestart(peerId, entry);
+    }, delayMs);
+  }
+
+  private async performIceRestart(
+    peerId: string,
+    entry: PeerEntry,
+  ): Promise<void> {
+    if (this.peers.get(peerId) !== entry) return;
+    if (this.isConnected(entry)) return;
+    if (entry.pc.signalingState !== "stable") {
+      this.scheduleIceRestart(peerId, entry, 1_000);
+      return;
+    }
+
+    entry.restartAttempts += 1;
+    try {
+      if (typeof entry.pc.restartIce === "function") entry.pc.restartIce();
+      await this.negotiate(peerId, entry);
+    } catch (error) {
+      this.options.onError?.(
+        error instanceof Error ? error.message : "Could not restart media",
+      );
+    }
+
+    // If the new candidates cannot repair the path, try again with a small
+    // backoff instead of leaving the call permanently silent.
+    if (this.isConnected(entry) || entry.restartTimer) return;
+    const delay = Math.min(15_000, 4_000 * entry.restartAttempts);
+    entry.restartTimer = setTimeout(() => {
+      entry.restartTimer = null;
+      this.scheduleIceRestart(peerId, entry, 0);
+    }, delay);
   }
 
   private async negotiate(peerId: string, entry: PeerEntry): Promise<void> {
@@ -297,6 +386,7 @@ export class PeerMesh {
     const entry = this.peers.get(peerId);
     if (!entry) return;
     this.peers.delete(peerId);
+    this.clearRestartTimer(entry);
     for (const track of entry.remoteStream.getTracks()) track.stop();
     entry.pc.onnegotiationneeded = null;
     entry.pc.onicecandidate = null;

@@ -139,11 +139,89 @@ export function RemoteAudio({ stream }: { stream: MediaStream }) {
   const ref = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    element.srcObject = stream;
-    void element.play().catch(() => undefined);
+    const audio = ref.current;
+    if (!audio) return;
+    let cancelled = false;
+    let waitingForGesture = false;
+
+    function cleanupGesture(): void {
+      document.removeEventListener("pointerdown", retry, true);
+      document.removeEventListener("keydown", retry, true);
+      document.removeEventListener("touchstart", retry, true);
+      document.removeEventListener("visibilitychange", onVisibility);
+      waitingForGesture = false;
+    }
+
+    function waitForGesture(): void {
+      if (cancelled || waitingForGesture) return;
+      waitingForGesture = true;
+      document.addEventListener("pointerdown", retry, true);
+      document.addEventListener("keydown", retry, true);
+      document.addEventListener("touchstart", retry, true);
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+
+    function onVisibility(): void {
+      if (document.visibilityState === "visible") retry();
+    }
+
+    function retry(): void {
+      if (cancelled) return;
+      cleanupGesture();
+      void attemptPlayback();
+    }
+
+    async function attemptPlayback(): Promise<void> {
+      if (cancelled) return;
+      const element = audio;
+      if (!element) return;
+      try {
+        // Browsers reject unmuted autoplay until the document has user
+        // activation. Retry on the next interaction instead of silently
+        // leaving the call mute; the element stays mounted so playback
+        // starts as soon as the gesture arrives.
+        await element.play();
+        cleanupGesture();
+      } catch (error) {
+        if (cancelled) return;
+        if (process.env.NODE_ENV !== "production") {
+          console.warn(
+            "[codesync] Remote audio is waiting for user activation",
+            error,
+          );
+        }
+        waitForGesture();
+      }
+    }
+
+    // A peer can publish camera and microphone as separate tracks. If the
+    // audio element was already mounted for a video-only stream, start
+    // playback when the microphone track finally arrives.
+    function onAddTrack(event: MediaStreamTrackEvent): void {
+      if (event.track.kind === "audio") void attemptPlayback();
+    }
+
+    stream.addEventListener("addtrack", onAddTrack);
+    audio.srcObject = stream;
+    void attemptPlayback();
+
+    return () => {
+      cancelled = true;
+      cleanupGesture();
+      stream.removeEventListener("addtrack", onAddTrack);
+      audio.srcObject = null;
+      audio.pause();
+    };
   }, [stream]);
 
-  return <audio ref={ref} autoPlay playsInline className="hidden" />;
+  return (
+    <audio
+      ref={ref}
+      autoPlay
+      playsInline
+      preload="auto"
+      aria-hidden="true"
+      className="sr-only"
+    />
+  );
 }

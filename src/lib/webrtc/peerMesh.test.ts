@@ -80,6 +80,7 @@ class MockPeerConnection {
   onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null;
   ontrack: ((event: RTCTrackEvent) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
+  restartIceCalls = 0;
   private descriptionId = 0;
 
   constructor(_configuration?: RTCConfiguration) {
@@ -132,6 +133,10 @@ class MockPeerConnection {
   }
 
   async addIceCandidate(_candidate: RTCIceCandidateInit): Promise<void> {}
+
+  restartIce(): void {
+    this.restartIceCalls += 1;
+  }
 
   close(): void {
     this.signalingState = "closed";
@@ -293,6 +298,34 @@ test("a dropped peer can be removed and negotiated again after reconnect", async
   assert.equal(mesh.hasPeer("b"), true);
   assert.notEqual(MockPeerConnection.instances[1], firstConnection);
 
+  mesh.closeAll();
+});
+
+test("the offerer restarts ICE after a failed media path", async () => {
+  const outgoing: Array<{ targetId: string; signal: RtcSignal }> = [];
+  const mesh = createMesh("a", outgoing).mesh;
+  mesh.ensurePeer("b");
+  const connection = MockPeerConnection.instances[0];
+
+  connection.connectionState = "failed";
+  connection.onconnectionstatechange?.();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(connection.restartIceCalls, 1);
+  assert.ok(outgoing.some((entry) => entry.signal.type === "offer"));
+  mesh.closeAll();
+});
+
+test("the answerer waits for the offerer to restart ICE", async () => {
+  const mesh = createMesh("b").mesh;
+  mesh.ensurePeer("a");
+  const connection = MockPeerConnection.instances[0];
+
+  connection.connectionState = "failed";
+  connection.onconnectionstatechange?.();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(connection.restartIceCalls, 0);
   mesh.closeAll();
 });
 
