@@ -329,6 +329,35 @@ test("the answerer waits for the offerer to restart ICE", async () => {
   mesh.closeAll();
 });
 
+test("removing a peer cancels a pending ICE restart timer", () => {
+  const scheduled = new Map<unknown, () => void>();
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  globalThis.setTimeout = ((callback: () => void) => {
+    const id = Symbol("timer");
+    scheduled.set(id, callback);
+    return id;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((id: unknown) => {
+    scheduled.delete(id);
+  }) as unknown as typeof clearTimeout;
+
+  try {
+    const mesh = createMesh("a").mesh;
+    mesh.ensurePeer("b");
+    const connection = MockPeerConnection.instances[0];
+    connection.connectionState = "disconnected";
+    connection.onconnectionstatechange?.();
+    assert.equal(scheduled.size, 1);
+
+    mesh.removePeer("b");
+    assert.equal(scheduled.size, 0);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
+});
+
 test("remote video is exposed only while unmuted and live", async () => {
   const { mesh, remoteStreams } = createMesh("b");
   await mesh.handleSignal("a", { type: "offer", sdp: "remote-offer" });

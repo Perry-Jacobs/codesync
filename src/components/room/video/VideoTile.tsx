@@ -146,8 +146,9 @@ export function RemoteAudio({ stream }: { stream: MediaStream }) {
 
     function cleanupGesture(): void {
       document.removeEventListener("pointerdown", retry, true);
+      document.removeEventListener("click", retry, true);
       document.removeEventListener("keydown", retry, true);
-      document.removeEventListener("touchstart", retry, true);
+      document.removeEventListener("touchend", retry, true);
       document.removeEventListener("visibilitychange", onVisibility);
       waitingForGesture = false;
     }
@@ -155,9 +156,12 @@ export function RemoteAudio({ stream }: { stream: MediaStream }) {
     function waitForGesture(): void {
       if (cancelled || waitingForGesture) return;
       waitingForGesture = true;
+      // `pointerdown` is usually early enough, but `click` is the event
+      // browsers most reliably treat as activation for media playback.
       document.addEventListener("pointerdown", retry, true);
+      document.addEventListener("click", retry, true);
       document.addEventListener("keydown", retry, true);
-      document.addEventListener("touchstart", retry, true);
+      document.addEventListener("touchend", retry, true);
       document.addEventListener("visibilitychange", onVisibility);
     }
 
