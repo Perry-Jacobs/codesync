@@ -248,14 +248,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
             }
           }
 
-          if (next.id === room.self?.id) {
-            if (next.mic !== media.micEnabled) {
-              media.setMicEnabled(next.mic);
-            }
-            if (next.cam !== media.camEnabled) {
-              media.setCamEnabled(next.cam);
-            }
-          }
+          // Do not copy this participant's own mic/cam state from a
+          // participant_updated echo. The grant that enables speak arrives as
+          // permission_changed followed by participant_updated with the old
+          // mic flag; applying that echo would switch the microphone off
+          // again and start an acquire/stop loop with the server. Authoritative
+          // self state comes from room_state/admitted, and forced mutes arrive
+          // as an explicit host_action.
           break;
         }
         case "participant_left": {
