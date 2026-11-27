@@ -30,9 +30,8 @@ export function ChatPanel({ variant = "desktop" }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [nearBottom, setNearBottom] = useState(true);
   const [unseenMessages, setUnseenMessages] = useState(0);
-  const pendingChat = useRef<{ clientMsgId: string; body: string } | null>(
-    null,
-  );
+  /** Sent-but-unacknowledged messages, keyed by clientMsgId. */
+  const pendingChat = useRef<Map<string, string>>(new Map());
   const canChat = hasCapability(self, "chat");
   // ChatPanel can stay mounted behind a closed compact drawer. Reopening the
   // rail must not erase the badge for messages that arrived while it was
@@ -47,13 +46,18 @@ export function ChatPanel({ variant = "desktop" }: ChatPanelProps) {
 
   useEffect(() => {
     const pending = pendingChat.current;
-    if (!pending) return;
-    const acknowledged = chat.some(
-      (message) => message.clientMsgId === pending.clientMsgId,
-    );
-    if (!acknowledged) return;
-    pendingChat.current = null;
-    setBody((current) => (current === pending.body ? "" : current));
+    if (pending.size === 0) return;
+    for (const [clientMsgId, body] of pending) {
+      const acknowledged = chat.some(
+        (message) => message.clientMsgId === clientMsgId,
+      );
+      if (acknowledged) {
+        pending.delete(clientMsgId);
+        // Clear the composer only while it still shows the message we sent;
+        // anything the user typed since sending is preserved.
+        setBody((current) => (current === body ? "" : current));
+      }
+    }
   }, [chat]);
 
   useEffect(() => {
@@ -74,7 +78,7 @@ export function ChatPanel({ variant = "desktop" }: ChatPanelProps) {
     const trimmed = body.trim();
     if (!trimmed || !canChat) return;
     const clientMsgId = nanoid(10);
-    pendingChat.current = { clientMsgId, body: trimmed };
+    pendingChat.current.set(clientMsgId, trimmed);
     send("chat_send", { body: trimmed, clientMsgId });
   };
 

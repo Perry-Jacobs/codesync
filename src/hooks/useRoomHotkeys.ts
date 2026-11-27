@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { toast } from "sonner";
+import { hasCapability } from "@/lib/acl";
 import type { HostWorkspaceApi } from "@/hooks/useHostWorkspace";
 import { useSaveWorkspace } from "@/hooks/useSaveWorkspace";
 import { useMediaStore } from "@/stores/media.store";
@@ -61,6 +62,11 @@ export function useRoomHotkeys({ host }: HotkeyOptions): void {
       const key = event.key.toLowerCase();
 
       if (modifier && key === "s") {
+        // Guests cannot save the workspace; leave Ctrl/Cmd+S to the browser
+        // instead of swallowing it with a warning toast.
+        if (!hasCapability(useRoomStore.getState().self, "save_workspace")) {
+          return;
+        }
         event.preventDefault();
         saveWorkspace();
         return;

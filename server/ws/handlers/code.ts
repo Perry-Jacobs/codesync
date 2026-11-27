@@ -5,9 +5,11 @@ import {
   getFileByPath,
   getParticipant,
   getRoom,
+  updateParticipant,
 } from "../../rooms/repository";
 import type { FileMeta } from "@/lib/ws-protocol";
 import type { ParticipantRecord, RoomRecord } from "../../rooms/types";
+import { toWireParticipant } from "../../rooms/types";
 import { WsError } from "../../errors";
 import {
   emit,
@@ -312,19 +314,37 @@ export async function handleYjsUpdate(
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const typingStartedAt = new Map<string, number>();
 
+/**
+ * Persists the typing flag through Redis and broadcasts the fresh record.
+ * Building the payload from the socket's cached participant would broadcast a
+ * stale snapshot (and a second gateway would never see the flag at all).
+ */
+async function broadcastTyping(
+  ctx: SocketContext,
+  typing: boolean,
+): Promise<void> {
+  const participant = ctx.participant;
+  const roomId = ctx.roomId;
+  if (!participant || !roomId) return;
+  const next = await updateParticipant(
+    roomId,
+    participant.id,
+    { typing },
+    { requireSocketId: ctx.id },
+  );
+  if (!next) return;
+  ctx.participant = next;
+  emit(roomId, "participant_updated", { participant: toWireParticipant(next) });
+}
+
 function markTyping(ctx: SocketContext): void {
   const participant = ctx.participant;
   if (!participant) return;
   const now = Date.now();
   const last = typingStartedAt.get(participant.id) ?? 0;
-  if (now - last > 1500) {
+  if (now - last > 1500 && !participant.typing) {
     typingStartedAt.set(participant.id, now);
-    if (!participant.typing) {
-      participant.typing = true;
-      emit(ctx.roomId ?? "", "participant_updated", {
-        participant: { ...participant, typing: true },
-      });
-    }
+    void broadcastTyping(ctx, true);
   }
   const existing = typingTimers.get(participant.id);
   if (existing) clearTimeout(existing);
@@ -332,11 +352,10 @@ function markTyping(ctx: SocketContext): void {
     participant.id,
     setTimeout(() => {
       typingTimers.delete(participant.id);
+      typingStartedAt.delete(participant.id);
       if (!ctx.participant || ctx.participant.id !== participant.id) return;
       ctx.participant.typing = false;
-      emit(ctx.roomId ?? "", "participant_updated", {
-        participant: { ...ctx.participant, typing: false },
-      });
+      void broadcastTyping(ctx, false);
     }, 2600),
   );
 }

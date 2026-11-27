@@ -65,10 +65,14 @@ export function WaitingRoomSheet({
           </Button>
           <Button
             variant="outline"
-            onClick={() => send("host_action", { action: "lock_room" })}
-            disabled={locked || !canAdmit}
+            onClick={() =>
+              send("host_action", {
+                action: locked ? "unlock_room" : "lock_room",
+              })
+            }
+            disabled={!canAdmit}
           >
-            <Lock className="h-4 w-4" /> Lock
+            <Lock className="h-4 w-4" /> {locked ? "Unlock" : "Lock"}
           </Button>
         </div>
 

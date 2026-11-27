@@ -228,11 +228,6 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     ...envelope,
-    type: z.literal("file_tree"),
-    data: z.object({ files: z.array(fileMeta).max(600) }),
-  }),
-  z.object({
-    ...envelope,
     type: z.literal("workspace_save"),
     data: z.object({
       operationId: z.string().min(1).max(64),

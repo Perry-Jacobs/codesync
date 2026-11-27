@@ -20,7 +20,9 @@ export function middleware(request: NextRequest) {
   // Real-time surfaces must never be cached by the browser, CDN or Next.
   if (pathname.startsWith("/room/") || pathname.startsWith("/join/")) {
     const key = pathname.split("/")[2];
-    if (key && !SESSION_KEY_RE.test(key)) {
+    // A missing or malformed key is invalid; an empty segment (e.g. /room/)
+    // must not slip through validation.
+    if (!key || !SESSION_KEY_RE.test(key)) {
       const url = new URL("/join", request.url);
       url.searchParams.set("invalidKey", "1");
       return NextResponse.redirect(url);

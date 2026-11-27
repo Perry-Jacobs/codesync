@@ -291,6 +291,12 @@ export async function handleJoinRoom(
   if (reservation === "locked") {
     throw new WsError("ROOM_LOCKED", "The host locked this session");
   }
+  if (reservation === "mode_changed") {
+    throw new WsError(
+      "CONFLICT",
+      "The host changed the admission mode; try joining again",
+    );
+  }
   if (reservation === "limit") {
     throw new WsError(
       "PARTICIPANT_LIMIT",

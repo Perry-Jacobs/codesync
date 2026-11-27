@@ -6,6 +6,7 @@ import type {
 import { hasCapability } from "@/lib/acl";
 import { languageFromPath } from "@/utils/language";
 import {
+  createFileIfAbsent,
   getFileById,
   getFileByPath,
   getParticipant,
@@ -139,7 +140,15 @@ export async function handleFileOp(
       mtime: Date.now(),
       lang: kind === "file" ? languageFromPath(data.path) : "plaintext",
     };
-    await upsertFile(room.id, meta);
+    // The pre-check against a stale `files` snapshot is not enough: two
+    // concurrent creates of the same path must not both land. The Lua script
+    // re-checks and writes atomically.
+    const created = await createFileIfAbsent(room.id, meta);
+    if (!created)
+      throw new WsError(
+        "CONFLICT",
+        "That path was just created by someone else",
+      );
     emit(room.id, "file_changed", { op: data.op, path: meta.path, meta }, {});
     log.info("entry created", {
       roomId: room.id,
@@ -335,7 +344,9 @@ export async function handleFsFileContent(
   if (file) {
     await upsertFile(room.id, {
       ...file,
-      size: data.content.length,
+      // Sizes are reported in bytes; string .length would misreport every
+      // multibyte (non-ASCII) file.
+      size: Buffer.byteLength(data.content, "utf8"),
       mtime: data.mtime,
     });
   }

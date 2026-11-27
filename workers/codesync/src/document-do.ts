@@ -2,6 +2,7 @@ import * as Y from "yjs";
 import { base64ToBytes, bytesToBase64 } from "./crypto";
 
 const SNAPSHOT_KEY = "yjs-snapshot";
+const SEEDED_KEY = "yjs-seeded";
 
 interface ApplyBody {
   update?: string;
@@ -46,7 +47,18 @@ export class DocumentDurableObject {
             doc.transact(() => text.insert(0, content), "seed");
             await this.persist(doc);
           }
+          // An empty file that came from disk is still seeded; without this
+          // flag a 0-byte file would look permanently cold and be re-read on
+          // every update.
+          await this.state.storage.put(SEEDED_KEY, true);
           return json({ ok: true, seeded: text.length > 0 });
+        });
+      }
+
+      if (request.method === "GET" && url.pathname === "/status") {
+        return this.enqueue(async () => {
+          const seeded = await this.state.storage.get<boolean>(SEEDED_KEY);
+          return json({ seeded: seeded === true });
         });
       }
 
@@ -83,6 +95,7 @@ export class DocumentDurableObject {
       if (request.method === "DELETE") {
         return this.enqueue(async () => {
           await this.state.storage.delete(SNAPSHOT_KEY);
+          await this.state.storage.delete(SEEDED_KEY);
           return json({ ok: true });
         });
       }

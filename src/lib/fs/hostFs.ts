@@ -156,14 +156,14 @@ export async function resolveParent(
 export async function readTextFile(
   root: DirHandleLike,
   path: string,
-): Promise<string> {
+): Promise<{ content: string; mtime: number }> {
   const { parent, name } = await resolveParent(root, path);
   const handle = await parent.getFileHandle(name);
   const file = await handle.getFile();
   if (file.size > MAX_FILE_BYTES) {
     throw new Error("File is too large to open in the editor");
   }
-  return file.text();
+  return { content: await file.text(), mtime: file.lastModified };
 }
 
 export async function writeTextFile(

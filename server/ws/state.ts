@@ -67,11 +67,13 @@ export async function buildRoomState(
     ...base,
     participants: sortParticipants(
       participants.filter(
-        // Only live sockets belong in the roster. A dropped participant keeps
-        // their record briefly so a reconnect restores the same identity, but
-        // showing that record produced duplicate (often HOST) entries.
+        // Only live, admitted sockets belong in the roster. A dropped
+        // participant keeps their record briefly so a reconnect restores the
+        // same identity, but showing that record produced duplicate (often
+        // HOST) entries. Waiting guests belong in the waiting list only.
         (participant) =>
-          participant.socketId !== null || participant.id === self.id,
+          participant.state === "ADMITTED" &&
+          (participant.socketId !== null || participant.id === self.id),
       ),
     ),
     files,

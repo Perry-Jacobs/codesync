@@ -17,6 +17,7 @@ import {
 } from "./types";
 
 export {
+  createFileIfAbsent,
   getFileById,
   getFileByPath,
   listFiles,
@@ -132,6 +133,7 @@ export async function createRoom(
     keys.queue(roomId),
     keys.chat(roomId),
     keys.files(roomId),
+    keys.fileIndex(roomId),
     keys.host(roomId),
     keys.keyLookup(keyHash),
     keys.roomKeys(roomId),
@@ -385,6 +387,12 @@ const RESERVE_SLOT_SCRIPT = `
   if not okRoom then return 3 end
   if room.status == 'ended' then return 3 end
   if room.status == 'locked' then return 2 end
+  -- The handler decides ADMITTED vs WAITING from a room snapshot taken before
+  -- this script runs. If the host flipped the admission mode in between, the
+  -- join must fail instead of bypassing (or needlessly waiting on) the new
+  -- mode; the client simply joins again.
+  if ARGV[1] == 'ADMITTED' and room.admitMode ~= 'auto' then return 4 end
+  if ARGV[1] == 'WAITING' and room.admitMode ~= 'manual' then return 4 end
   local values = redis.call('HGETALL', KEYS[1])
   local count = 0
   for index = 1, #values, 2 do
@@ -429,7 +437,7 @@ const ADMIT_SLOT_SCRIPT = `
 `;
 
 export type ParticipantReservation =
-  "reserved" | "limit" | "locked" | "ended" | "missing";
+  "reserved" | "limit" | "locked" | "ended" | "missing" | "mode_changed";
 
 export async function reserveParticipantSlot(
   roomId: string,
@@ -454,6 +462,8 @@ export async function reserveParticipantSlot(
       return "locked";
     case 3:
       return "ended";
+    case 4:
+      return "mode_changed";
     default:
       return "limit";
   }
@@ -727,6 +737,7 @@ export async function purgeRoom(roomId: string): Promise<void> {
     .del(keys.queue(roomId))
     .del(keys.chat(roomId))
     .del(keys.files(roomId))
+    .del(keys.fileIndex(roomId))
     .del(keys.host(roomId))
     .del(keys.roomKeys(roomId))
     .srem(keys.activeRooms(), roomId)

@@ -99,6 +99,9 @@ interface SocketAttachment {
   files: string[];
   messageCount: number;
   rateStartedAt: number;
+  /** Chat quota parity with the Node gateway: 5 messages per 10 s. */
+  chatCount: number;
+  chatWindowStart: number;
   presence?: FilePresenceState;
 }
 
@@ -130,6 +133,13 @@ export class RoomDurableObject {
       resolve: (value: FsResponse) => void;
       timer: ReturnType<typeof setTimeout>;
     }
+  >();
+
+  /** Per-participant typing state (the Node gateway's markTyping parity). */
+  private readonly typingStartedAt = new Map<string, number>();
+  private readonly typingTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
   >();
 
   constructor(
@@ -179,6 +189,25 @@ export class RoomDurableObject {
     if (!parsed.ok) {
       this.sendError(webSocket, parsed.code, parsed.detail);
       return;
+    }
+    // Chat had no per-type quota on the Worker while the Node gateway allows
+    // 5 messages per 10 s; give chat the same budget here.
+    if (parsed.message.type === "chat_send") {
+      const now = Date.now();
+      if (now - attachment.chatWindowStart >= 10_000) {
+        attachment.chatWindowStart = now;
+        attachment.chatCount = 0;
+      }
+      attachment.chatCount += 1;
+      webSocket.serializeAttachment(attachment satisfies SocketAttachment);
+      if (attachment.chatCount > 5) {
+        this.sendError(
+          webSocket,
+          "RATE_LIMITED",
+          "Slow down — you can send 5 chat messages at a time",
+        );
+        return;
+      }
     }
     if (
       !attachment.participantId &&
@@ -284,6 +313,8 @@ export class RoomDurableObject {
       files: [],
       messageCount: 0,
       rateStartedAt: Date.now(),
+      chatCount: 0,
+      chatWindowStart: 0,
     } satisfies SocketAttachment);
     void this.ctx.storage.setAlarm(Date.now() + 15_000);
     void request;
@@ -346,10 +377,16 @@ export class RoomDurableObject {
       reconnectCredentials: {},
       pendingFs: {},
     };
-    const exists = await this.ctx.storage.get<DurableRoomState>(STATE_KEY);
-    if (exists)
+    const created = await this.ctx.storage.transaction(async (txn) => {
+      // Two concurrent /internal/create calls for the same key must not both
+      // pass a plain get-then-put check; the transaction serialises them.
+      const exists = await txn.get<DurableRoomState>(STATE_KEY);
+      if (exists) return false;
+      await txn.put(STATE_KEY, state);
+      return true;
+    });
+    if (!created)
       return json({ error: "Room already exists", code: "CONFLICT" }, 409);
-    await this.ctx.storage.put(STATE_KEY, state);
     return json({
       roomKey: room.key,
       roomId: room.id,
@@ -882,11 +919,18 @@ export class RoomDurableObject {
       throw new RoomError("INVALID_MESSAGE", "Empty update");
     if (bytes.length > 300_000)
       throw new RoomError("PAYLOAD_TOO_LARGE", "Update too large");
+    const roomState = await this.readState();
+    // A local-fs document must be seeded from the host's disk before any
+    // client update is applied. Otherwise a cold update can replace the
+    // original file with an empty Yjs document (the Node gateway guards the
+    // same hazard in acquireSeededDoc).
+    if (roomState?.room.workspaceMode === "local-fs") {
+      await this.seedColdDocument(file, actor.id);
+    }
     await this.documentRequest(file.fileId, "POST", "/apply", {
       update: data.update,
     });
     this.subscribeFile(actor.id, file.fileId);
-    const roomState = await this.readState();
     if (roomState?.room.workspaceMode === "local-fs") {
       const text = (await this.documentRequest(
         file.fileId,
@@ -903,12 +947,49 @@ export class RoomDurableObject {
         content: text.content,
       }).catch(() => undefined);
     }
+    this.markTyping(actor);
     await this.broadcastFile(
       "yjs_sync",
       { fileId: file.fileId, update: data.update, kind: "diff" },
       file.fileId,
       this.socketId(webSocket),
     );
+  }
+
+  /**
+   * Seeds a cold local-fs document from the host's disk exactly once. The
+   * document DO records whether it has been seeded, so warm documents never
+   * pay for a host round-trip.
+   */
+  private async seedColdDocument(
+    file: FileMeta,
+    requesterId: string,
+  ): Promise<void> {
+    const status = (await this.documentRequest(
+      file.fileId,
+      "GET",
+      "/status",
+    )) as { seeded: boolean };
+    if (status.seeded) return;
+    const response = await this.requestHost({
+      op: "read",
+      requesterId,
+      fileId: file.fileId,
+      path: file.path,
+    });
+    if (!response.ok || typeof response.content !== "string") {
+      throw new RoomError(
+        "FS_TIMEOUT",
+        response.error ?? "Could not read the file from the host",
+      );
+    }
+    await this.documentRequest(file.fileId, "POST", "/seed", {
+      content: response.content,
+    });
+    await this.updateFile(file.fileId, {
+      size: new TextEncoder().encode(response.content).length,
+      mtime: response.mtime ?? Date.now(),
+    });
   }
 
   private async handleYjsSync(
@@ -919,6 +1000,13 @@ export class RoomDurableObject {
     // Read-only participants may open a file and follow live edits. Writes
     // remain gated by handleYjsUpdate below.
     const file = await this.resolveFile(data.fileId, "");
+    const state = await this.readState();
+    // A sync request on a cold local-fs file must seed it from disk first,
+    // otherwise the client receives an empty snapshot and a later edit from
+    // that client replaces the file's real content.
+    if (state?.room.workspaceMode === "local-fs") {
+      await this.seedColdDocument(file, actor.id);
+    }
     this.subscribeFile(actor.id, file.fileId);
     await this.replayFilePresence(webSocket, file.fileId);
     const result = (await this.documentRequest(
@@ -963,7 +1051,7 @@ export class RoomDurableObject {
           content: response.content,
         });
         await this.updateFile(file.fileId, {
-          size: response.content.length,
+          size: new TextEncoder().encode(response.content).length,
           mtime: response.mtime ?? Date.now(),
         });
       }
@@ -1012,7 +1100,19 @@ export class RoomDurableObject {
         mtime: Date.now(),
         lang: data.op === "mkdir" ? "plaintext" : languageFromPath(data.path),
       };
-      await this.upsertFile(meta);
+      // The conflict pre-check ran against a snapshot; re-check inside the
+      // transaction so two concurrent creates cannot both land.
+      const created = await this.updateState((current) => {
+        if (current.files.some((entry) => entry.path === data.path))
+          return false;
+        current.files.push(meta);
+        return true;
+      });
+      if (!created)
+        throw new RoomError(
+          "CONFLICT",
+          "That path was just created by someone else",
+        );
       await this.broadcast("file_changed", {
         op: data.op,
         path: meta.path,
@@ -1103,7 +1203,11 @@ export class RoomDurableObject {
             ),
         );
         for (const entry of deletedFiles) {
-          if (entry.kind === "file") this.clearFilePresence(entry.fileId);
+          if (entry.kind === "file") {
+            // The Node gateway clears presence and subscriptions together;
+            // clearFilePresence removes both.
+            this.clearFilePresence(entry.fileId);
+          }
         }
       });
       await Promise.allSettled(
@@ -1231,9 +1335,11 @@ export class RoomDurableObject {
             entry.fileId === (data as ClientPayloads["fs_file_content"]).fileId,
         );
         if (file) {
-          file.size = (
-            data as ClientPayloads["fs_file_content"]
-          ).content.length;
+          // Byte length, not string length, so multibyte files report their
+          // real size (matches the Node gateway's Buffer.byteLength).
+          file.size = new TextEncoder().encode(
+            (data as ClientPayloads["fs_file_content"]).content,
+          ).length;
           file.mtime = (data as ClientPayloads["fs_file_content"]).mtime;
         }
       }
@@ -1334,8 +1440,18 @@ export class RoomDurableObject {
       }
       case "admit_all": {
         requireCapability("admit");
-        for (const id of [...state.waiting])
-          await this.admitParticipant(id, "VIEWER");
+        for (const id of [...state.waiting]) {
+          // The Node gateway stops admitting once the room is full instead of
+          // failing the whole action; match that behaviour so one full seat
+          // does not error out the remaining queue.
+          try {
+            await this.admitParticipant(id, "VIEWER");
+          } catch (error) {
+            if (error instanceof RoomError && error.code === "PARTICIPANT_LIMIT")
+              break;
+            throw error;
+          }
+        }
         break;
       }
       case "deny": {
@@ -1573,6 +1689,25 @@ export class RoomDurableObject {
         for (const webSocket of this.ctx.getWebSockets()) {
           webSocket.close(WS_CLOSE.ROOM_ENDED, "Session ended");
         }
+        // The Node gateway purges everything on end; without this the room
+        // state and every document snapshot would sit in DO storage forever,
+        // keeping room contents after the session and blocking the key from
+        // ever being reused.
+        const endedFiles = (await this.listFiles()).filter(
+          (entry) => entry.kind === "file",
+        );
+        await Promise.allSettled(
+          endedFiles.map((entry) =>
+            this.documentRequest(entry.fileId, "DELETE", "/delete"),
+          ),
+        );
+        for (const { resolve, timer } of this.pendingResponses.values()) {
+          clearTimeout(timer);
+          resolve({ ok: false, error: "The session has ended" });
+        }
+        this.pendingResponses.clear();
+        await this.ctx.storage.deleteAlarm();
+        await this.ctx.storage.deleteAll();
         break;
       }
       case "toggle_admit_mode": {
@@ -1915,16 +2050,6 @@ export class RoomDurableObject {
     return file;
   }
 
-  private async upsertFile(file: FileMeta): Promise<void> {
-    await this.updateState((state) => {
-      const index = state.files.findIndex(
-        (entry) => entry.fileId === file.fileId,
-      );
-      if (index >= 0) state.files[index] = file;
-      else state.files.push(file);
-    });
-  }
-
   private async updateFile(
     fileId: string,
     patch: Partial<FileMeta>,
@@ -2183,6 +2308,8 @@ export class RoomDurableObject {
       presence: value?.presence ?? {},
       messageCount: value?.messageCount ?? 0,
       rateStartedAt: value?.rateStartedAt ?? Date.now(),
+      chatCount: value?.chatCount ?? 0,
+      chatWindowStart: value?.chatWindowStart ?? 0,
     };
   }
 
@@ -2202,6 +2329,44 @@ export class RoomDurableObject {
     attachment.messageCount += 1;
     webSocket.serializeAttachment(attachment satisfies SocketAttachment);
     return attachment.messageCount <= MESSAGE_RATE_LIMIT;
+  }
+
+  /**
+   * Flags an editor as typing for the room after document edits, mirroring
+   * the Node gateway's markTyping: a 1.5 s start gate, then an automatic
+   * clear 2.6 s after the last update.
+   */
+  private markTyping(actor: ParticipantRecord): void {
+    const now = Date.now();
+    const last = this.typingStartedAt.get(actor.id) ?? 0;
+    if (now - last > 1_500 && !actor.typing) {
+      this.typingStartedAt.set(actor.id, now);
+      void this.updateParticipant(actor.id, { typing: true })
+        .then((next) => {
+          if (next)
+            void this.broadcast("participant_updated", {
+              participant: toWire(next),
+            });
+        })
+        .catch(() => undefined);
+    }
+    const existing = this.typingTimers.get(actor.id);
+    if (existing) clearTimeout(existing);
+    this.typingTimers.set(
+      actor.id,
+      setTimeout(() => {
+        this.typingTimers.delete(actor.id);
+        this.typingStartedAt.delete(actor.id);
+        void this.updateParticipant(actor.id, { typing: false })
+          .then((next) => {
+            if (next)
+              void this.broadcast("participant_updated", {
+                participant: toWire(next),
+              });
+          })
+          .catch(() => undefined);
+      }, 2_600),
+    );
   }
 
   private evictSocket(
@@ -2265,6 +2430,8 @@ export class RoomDurableObject {
   }
 
   private pickColor(seed: number): string {
+    // Mirrors PARTICIPANT_COLORS in the Node gateway's rooms/types.ts so the
+    // same participant seed renders the same avatar color on both backends.
     const colors = [
       "#4ea1ff",
       "#f2a33c",
@@ -2272,6 +2439,10 @@ export class RoomDurableObject {
       "#ff7b9c",
       "#c792ea",
       "#5ad4c8",
+      "#ffb86c",
+      "#a3b8ff",
+      "#f78c6c",
+      "#8bd5ff",
     ];
     return colors[seed % colors.length] ?? colors[0];
   }

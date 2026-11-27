@@ -47,7 +47,10 @@ async function createRoomResponse(request: IncomingMessage): Promise<Response> {
   let body: unknown;
   try {
     body = JSON.parse(await readBody(request));
-  } catch {
+  } catch (error) {
+    if (error instanceof BodyTooLargeError) {
+      return apiError(413, "PAYLOAD_TOO_LARGE", "Request body is too large");
+    }
     return apiError(400, "BAD_REQUEST", "Expected a JSON body");
   }
   const parsed = createRoomSchema.safeParse(body);
@@ -132,13 +135,15 @@ function formatRetryAfter(seconds: number): string {
   return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
+class BodyTooLargeError extends Error {}
+
 async function readBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > 16 * 1024) throw new Error("Request body is too large");
+    if (size > 16 * 1024) throw new BodyTooLargeError("Request body is too large");
     chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString("utf8");

@@ -156,6 +156,9 @@ async function denyParticipant(
   room: RoomRecord,
   target: ParticipantRecord,
 ): Promise<void> {
+  // Terminal records are immutable in Redis; a repeated deny is a no-op, not
+  // a conflict, so the host UI never shows a misleading failure.
+  if (target.state === "DENIED" || target.state === "REMOVED") return;
   const next = await updateParticipant(room.id, target.id, {
     state: "DENIED",
     socketId: null,
@@ -178,6 +181,9 @@ async function kickParticipant(
   target: ParticipantRecord,
   reason: string,
 ): Promise<void> {
+  // Already removed (or denied): the participant_left event already went out;
+  // a repeat click must not surface a conflict for an immutable record.
+  if (target.state === "REMOVED" || target.state === "DENIED") return;
   const next = await updateParticipant(room.id, target.id, {
     state: "REMOVED",
     socketId: null,

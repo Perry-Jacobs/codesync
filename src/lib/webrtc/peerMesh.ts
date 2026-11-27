@@ -351,7 +351,9 @@ export class PeerMesh {
         const sender = entry.pc
           .getTransceivers()
           .find((tx) => tx.receiver.track.kind === "audio")?.sender;
-        if (!sender) return;
+        // Replacing an unchanged track renegotiates nothing but still costs a
+        // promise per peer per toggle; skip the no-op.
+        if (!sender || sender.track === track) return;
         try {
           await sender.replaceTrack(track);
         } catch (error) {
@@ -372,7 +374,7 @@ export class PeerMesh {
         const sender = entry.pc
           .getTransceivers()
           .find((tx) => tx.receiver.track.kind === "video")?.sender;
-        if (!sender) return;
+        if (!sender || sender.track === track) return;
         try {
           await sender.replaceTrack(track);
         } catch (error) {

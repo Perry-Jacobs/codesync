@@ -368,10 +368,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           }
           break;
         }
-        case "file_tree": {
-          workspace.setFiles(message.data.files);
-          break;
-        }
         case "workspace_reset": {
           // The gateway discards every document when the host folder is
           // attached or reloaded. Drop our cached copies too so the fresh

@@ -7,6 +7,7 @@ export {
 } from "./ws-server-schema";
 import {
   MAX_CONTENT_CHARS,
+  MAX_MESSAGE_BYTES,
   PROTOCOL_VERSION,
   REACTION_EMOJIS,
   type ClientMessage,
@@ -255,11 +256,18 @@ export type ParseClientMessageResult =
   | { ok: false; code: WsErrorCode; detail: string };
 
 export function parseClientMessage(raw: string): ParseClientMessageResult {
-  if (raw.length > 480_000) {
+  // Cheap char-length pre-check; only frames that could plausibly exceed the
+  // byte limit under UTF-8 expansion (up to 4 bytes per char) pay for the
+  // exact TextEncoder measurement.
+  if (
+    raw.length > MAX_MESSAGE_BYTES ||
+    (raw.length > MAX_MESSAGE_BYTES / 4 &&
+      new TextEncoder().encode(raw).byteLength > MAX_MESSAGE_BYTES)
+  ) {
     return {
       ok: false,
       code: "PAYLOAD_TOO_LARGE",
-      detail: "frame exceeds 480k characters",
+      detail: "frame exceeds 480k bytes",
     };
   }
   let parsedJson: unknown;

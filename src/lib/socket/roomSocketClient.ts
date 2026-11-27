@@ -61,6 +61,10 @@ export class RoomSocketClient {
     this.credentials = { ...credentials };
     this.manualClose = false;
     this.attempts = 0;
+    // A reconnect timer scheduled for a previous socket drop must die with
+    // this explicit connect, otherwise it fires later and opens a second
+    // socket while this one is live (duplicate joins, server-side evictions).
+    this.clearTimers();
     this.closeSocket();
     this.setStatus("connecting");
     this.open();

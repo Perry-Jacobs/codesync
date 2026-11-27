@@ -14,6 +14,8 @@ interface DocEntry {
   created: boolean;
   timer: ReturnType<typeof setTimeout> | null;
   lastUsed: number;
+  /** Failed CAS attempts for the current dirty state; drives the retry cap. */
+  persistAttempts: number;
 }
 
 const docs = new Map<string, DocEntry>();
@@ -84,6 +86,7 @@ export async function acquireDoc(
         created: snapshot === null,
         timer: null,
         lastUsed: Date.now(),
+        persistAttempts: 0,
       };
       docs.set(key, entry);
       evictIfNeeded();
@@ -212,6 +215,9 @@ function markDirty(roomId: string, fileId: string, entry: DocEntry): void {
   }, PERSIST_DEBOUNCE_MS);
 }
 
+const MAX_PERSIST_ATTEMPTS = 5;
+const PERSIST_RETRY_MS = 2_000;
+
 async function persist(
   roomId: string,
   fileId: string,
@@ -258,13 +264,32 @@ async function persist(
           .sadd(keys.roomKeys(roomId), redisKey)
           .expire(keys.roomKeys(roomId), ttl)
           .exec();
+        entry.persistAttempts = 0;
         return;
       }
     }
     throw new Error("snapshot changed too frequently to persist");
   } catch (error) {
     entry.dirty = true;
-    log.error("snapshot failed", { roomId, fileId, error: String(error) });
+    entry.persistAttempts += 1;
+    log.error("snapshot failed", {
+      roomId,
+      fileId,
+      attempt: entry.persistAttempts,
+      error: String(error),
+    });
+    // A failed persist must not strand a dirty document. Re-arm a retry while
+    // attempts remain, otherwise a doc with no refs and no timer would keep
+    // its edits only in memory until the gateway restarts.
+    if (
+      entry.persistAttempts < MAX_PERSIST_ATTEMPTS &&
+      !entry.timer
+    ) {
+      entry.timer = setTimeout(() => {
+        entry.timer = null;
+        void persist(roomId, fileId, entry);
+      }, PERSIST_RETRY_MS);
+    }
   }
 }
 
@@ -292,7 +317,8 @@ export async function flushAll(): Promise<void> {
 export async function deleteDoc(roomId: string, fileId: string): Promise<void> {
   const key = docKey(roomId, fileId);
   await flushKey(key);
-  if (docs.get(key)?.timer) clearTimeout(docs.get(key)?.timer ?? undefined);
+  const entry = docs.get(key);
+  if (entry?.timer) clearTimeout(entry.timer);
   docs.delete(key);
   await getRedis().del(keys.doc(roomId, fileId));
 }

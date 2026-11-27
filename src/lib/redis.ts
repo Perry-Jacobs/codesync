@@ -56,6 +56,7 @@ export const keys = {
   queue: (roomId: string) => `${room(roomId)}:queue`,
   chat: (roomId: string) => `${room(roomId)}:chat`,
   files: (roomId: string) => `${room(roomId)}:files`,
+  fileIndex: (roomId: string) => `${room(roomId)}:fileIndex`,
   host: (roomId: string) => `${room(roomId)}:host`,
   doc: (roomId: string, fileId: string) => `${room(roomId)}:doc:${fileId}`,
   bus: (roomId: string) => `${room(roomId)}:bus`,

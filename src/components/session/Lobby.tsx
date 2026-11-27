@@ -118,7 +118,12 @@ export function Lobby({
     };
 
     void load();
-    const interval = window.setInterval(() => void load(), 5_000);
+    const interval = window.setInterval(() => {
+      // Polling a lobby the user cannot see burns requests for nothing; the
+      // next tick after the tab becomes visible refreshes the state.
+      if (document.visibilityState === "hidden") return;
+      void load();
+    }, 5_000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);

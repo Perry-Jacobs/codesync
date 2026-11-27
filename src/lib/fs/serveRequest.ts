@@ -57,12 +57,14 @@ export async function serveFsRequest(
           fail(new Error("Read request is missing the file id"));
           return;
         }
-        const content = await readTextFile(root, request.path);
+        // Report the file's real last-modified time so room metadata does not
+        // claim every file changed at the moment it was opened.
+        const { content, mtime } = await readTextFile(root, request.path);
         send("fs_file_content", {
           requestId: request.requestId,
           fileId: request.fileId,
           content,
-          mtime: Date.now(),
+          mtime,
         });
         return;
       }

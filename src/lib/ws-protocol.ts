@@ -230,7 +230,6 @@ export interface ServerPayloads {
     payload?: Record<string, unknown>;
   };
   chat_message: { message: ChatMessage };
-  file_tree: { files: FileMeta[] };
   workspace_reset: {
     files: FileMeta[];
     rootName: string | null;
