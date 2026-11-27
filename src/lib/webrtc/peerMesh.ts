@@ -15,12 +15,21 @@ interface PeerEntry {
   restartAttempts: number;
   restartTimer: ReturnType<typeof setTimeout> | null;
   failureReported: boolean;
+  /** Fired when a connection lingers in "connecting" instead of failing. */
+  connectWatchdog: ReturnType<typeof setTimeout> | null;
 }
 
 /** Let a transient ICE drop recover before paying for a restart. */
 const DISCONNECTED_GRACE_MS = 2_500;
 /** Keep retrying a dead media path for roughly half a minute. */
 const MAX_ICE_RESTARTS = 4;
+/**
+ * STUN-only paths between restrictive networks often hang in "connecting"
+ * instead of failing promptly; if a connection has not come up in this long,
+ * the deterministic offerer restarts ICE rather than leaving the pair silent
+ * with no diagnostic.
+ */
+const CONNECT_WATCHDOG_MS = 8_000;
 
 export interface PeerMeshOptions {
   iceServers: RTCIceServer[];
@@ -71,8 +80,24 @@ export class PeerMesh {
       restartAttempts: 0,
       restartTimer: null,
       failureReported: false,
+      connectWatchdog: null,
     };
     this.peers.set(peerId, entry);
+
+    // A connection that never comes up (offer or answer lost in transit, a
+    // filtered network path) must not leave the pair permanently silent with
+    // no diagnostic. The deterministic offerer retries; the polite side keeps
+    // waiting for the offer it follows.
+    entry.connectWatchdog = setTimeout(() => {
+      entry.connectWatchdog = null;
+      if (
+        this.peers.get(peerId) !== entry ||
+        entry.pc.connectionState === "connected"
+      ) {
+        return;
+      }
+      if (!entry.polite) this.scheduleIceRestart(peerId, entry, 0);
+    }, CONNECT_WATCHDOG_MS);
 
     // Only the deterministic initiator pre-creates transceivers. The answerer
     // derives them from the remote offer; pre-creating them on both sides can
@@ -149,13 +174,21 @@ export class PeerMesh {
         entry.restartAttempts = 0;
         entry.failureReported = false;
         this.clearRestartTimer(entry);
+        this.clearConnectWatchdog(entry);
         return;
       }
       if (state === "closed") {
         this.clearRestartTimer(entry);
+        this.clearConnectWatchdog(entry);
+        return;
+      }
+      if (state === "connecting") {
+        // The watchdog armed at peer creation covers this state; nothing to
+        // re-arm here.
         return;
       }
       if (state !== "failed" && state !== "disconnected") return;
+      this.clearConnectWatchdog(entry);
       // Only the deterministic offerer restarts ICE, keeping the pair free of
       // glare. The answerer follows the new ufrag in the offer.
       if (entry.polite) return;
@@ -165,6 +198,12 @@ export class PeerMesh {
         state === "failed" ? 0 : DISCONNECTED_GRACE_MS,
       );
     };
+  }
+
+  private clearConnectWatchdog(entry: PeerEntry): void {
+    if (!entry.connectWatchdog) return;
+    clearTimeout(entry.connectWatchdog);
+    entry.connectWatchdog = null;
   }
 
   private isConnected(entry: PeerEntry): boolean {
@@ -210,6 +249,21 @@ export class PeerMesh {
     if (this.peers.get(peerId) !== entry) return;
     if (this.isConnected(entry)) return;
     if (entry.pc.signalingState !== "stable") {
+      // An answer that was lost in transit leaves the offerer parked in
+      // have-local-offer forever — no stable state will ever arrive. Re-send
+      // the pending offer instead; the polite peer re-answers if it already
+      // processed the original.
+      if (
+        !entry.makingOffer &&
+        entry.pc.signalingState === "have-local-offer" &&
+        entry.pc.localDescription
+      ) {
+        this.options.sendSignal(peerId, {
+          type: "offer",
+          sdp: entry.pc.localDescription.sdp,
+        });
+        return;
+      }
       this.scheduleIceRestart(peerId, entry, 1_000);
       return;
     }
@@ -393,6 +447,7 @@ export class PeerMesh {
     if (!entry) return;
     this.peers.delete(peerId);
     this.clearRestartTimer(entry);
+    this.clearConnectWatchdog(entry);
     for (const track of entry.remoteStream.getTracks()) track.stop();
     entry.pc.onnegotiationneeded = null;
     entry.pc.onicecandidate = null;

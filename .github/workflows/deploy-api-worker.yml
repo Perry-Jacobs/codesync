@@ -74,7 +74,24 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           ALLOWED_ORIGINS: https://codesync.sallydon164.workers.dev,http://localhost:3000
           PUBLIC_APP_URL: https://codesync.sallydon164.workers.dev
-        run: >-
-          npx wrangler deploy
-          --var ALLOWED_ORIGINS:$ALLOWED_ORIGINS
-          --var PUBLIC_APP_URL:$PUBLIC_APP_URL
+          STUN_SERVERS: ${{ vars.STUN_SERVERS != '' && vars.STUN_SERVERS || 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302' }}
+          TURN_SERVER: ${{ secrets.TURN_SERVER }}
+          TURN_SECRET: ${{ secrets.TURN_SECRET }}
+          TURN_USERNAME: ${{ secrets.TURN_USERNAME }}
+          TURN_PASSWORD: ${{ secrets.TURN_PASSWORD }}
+          TURN_CREDENTIAL_TTL_SECONDS: ${{ vars.TURN_CREDENTIAL_TTL_SECONDS }}
+        run: |
+          ARGS=(
+            --var "ALLOWED_ORIGINS:$ALLOWED_ORIGINS"
+            --var "PUBLIC_APP_URL:$PUBLIC_APP_URL"
+            --var "STUN_SERVERS:$STUN_SERVERS"
+          )
+          # TURN is optional: pass each variable only when a secret/vars value
+          # is configured, so a deployment without TURN stays STUN-only.
+          for var_name in TURN_SERVER TURN_SECRET TURN_USERNAME TURN_PASSWORD TURN_CREDENTIAL_TTL_SECONDS; do
+            value="${!var_name}"
+            if [ -n "$value" ]; then
+              ARGS+=(--var "$var_name:$value")
+            fi
+          done
+          npx wrangler deploy "${ARGS[@]}"

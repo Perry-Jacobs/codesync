@@ -40,6 +40,20 @@ function permissionMessage(error: unknown, device: string): string {
   return `Could not start the ${device.toLowerCase()}`;
 }
 
+/**
+ * Used when the RTC config endpoint is unreachable. Two independent STUN
+ * servers raise the odds of a direct path when the deployment has not been
+ * given a TURN server yet.
+ */
+const FALLBACK_ICE_SERVERS: RTCIceServer[] = [
+  {
+    urls: [
+      "stun:stun.l.google.com:19302",
+      "stun:stun1.l.google.com:19302",
+    ],
+  },
+];
+
 export interface WebRtcApi {
   localStream: MediaStream | null;
   micEnabled: boolean;
@@ -108,13 +122,15 @@ export function useWebRTC(): WebRtcApi {
       })
       .then((payload) => {
         setIceServers(
-          payload.iceServers ?? [{ urls: "stun:stun.l.google.com:19302" }],
+          payload.iceServers?.length
+            ? payload.iceServers
+            : FALLBACK_ICE_SERVERS,
         );
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError")
           return;
-        setIceServers([{ urls: "stun:stun.l.google.com:19302" }]);
+        setIceServers(FALLBACK_ICE_SERVERS);
       });
     return () => controller.abort();
   }, []);

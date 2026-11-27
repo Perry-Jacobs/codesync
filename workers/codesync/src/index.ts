@@ -30,7 +30,15 @@ export default {
       } else if (url.pathname === "/ws")
         response = await handleWebSocket(request, env, url);
       else if (url.pathname === "/api/health")
-        response = json({ ok: true, version: "0.1.0", durableObjects: true });
+        response = json({
+          ok: true,
+          version: "0.1.0",
+          durableObjects: true,
+          // Media-relay diagnostic: when this is false, browsers can only get
+          // a direct P2P path via STUN, which fails across symmetric NATs and
+          // carrier CGNAT (the usual cause of one-way or missing audio).
+          turn: Boolean((env.TURN_SERVER ?? "").trim()),
+        });
       else if (url.pathname === "/api/rtc/config")
         response = await rtcConfig(env);
       else if (url.pathname === "/api/rooms")

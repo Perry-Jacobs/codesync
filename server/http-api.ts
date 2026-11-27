@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import { createHmac } from "node:crypto";
 import {
   createRoomSchema,
   type CreateRoomResponse,
@@ -22,7 +23,13 @@ export async function handleLegacyHttpApi(
   const path = url.pathname;
 
   if (path === "/api/health" && request.method === "GET") {
-    return json({ ok: true, version: "0.1.0", durableObjects: false });
+    const env = getEnv();
+    return json({
+      ok: true,
+      version: "0.1.0",
+      durableObjects: false,
+      turn: Boolean(env.TURN_SERVER.trim()),
+    });
   }
   if (path === "/api/rtc/config" && request.method === "GET") {
     return json(rtcConfig());
@@ -104,11 +111,26 @@ function rtcConfig(): { iceServers: RTCIceServer[]; maxBitrateKbps: number } {
   const iceServers: RTCIceServer[] = [];
   if (env.stunServers.length > 0) iceServers.push({ urls: env.stunServers });
   if (env.TURN_SERVER) {
-    iceServers.push({
-      urls: env.TURN_SERVER,
-      username: env.TURN_USERNAME || undefined,
-      credential: env.TURN_PASSWORD || undefined,
-    });
+    // Time-limited HMAC credentials (coTURN use-auth-secret style) keep the
+    // TURN password out of the client bundle; static credentials remain
+    // supported for simple deployments.
+    if (env.TURN_SECRET) {
+      const ttl = 3_600;
+      const username = `${Math.floor(Date.now() / 1000) + ttl}:codesync`;
+      iceServers.push({
+        urls: env.TURN_SERVER,
+        username,
+        credential: createHmac("sha1", env.TURN_SECRET)
+          .update(username)
+          .digest("base64"),
+      });
+    } else {
+      iceServers.push({
+        urls: env.TURN_SERVER,
+        username: env.TURN_USERNAME || undefined,
+        credential: env.TURN_PASSWORD || undefined,
+      });
+    }
   }
   return { iceServers, maxBitrateKbps: 900 };
 }

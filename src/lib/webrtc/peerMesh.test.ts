@@ -382,3 +382,149 @@ test("remote video is exposed only while unmuted and live", async () => {
 
   mesh.closeAll();
 });
+
+/**
+ * Full two-peer relay: exactly the production audio scenario. Mesh "a" (the
+ * deterministic offerer) speaks from the start; mesh "b" is silent at answer
+ * time and only receives its microphone later — the guest-speak-grant flow.
+ * Both sides must end up with each other's audio track, and a lost answer
+ * must be recovered by re-sending the pending offer.
+ */
+test("audio flows both ways once a silent answerer is granted speak access", async () => {
+  const aRemote = new Map<string, MediaStream | null>();
+  const bRemote = new Map<string, MediaStream | null>();
+  // Each mesh forwards the other's signals; meshA's closure resolves meshB at
+  // call time, after both meshes exist.
+  const meshA = new PeerMesh({
+    iceServers: [],
+    selfId: "a",
+    sendSignal: (targetId, signal) => {
+      if (targetId === "b") void meshB.handleSignal("a", signal);
+    },
+    onRemoteStream: (id, stream) => aRemote.set(id, stream),
+    onStateChange: () => undefined,
+  });
+  const meshB: PeerMesh = new PeerMesh({
+    iceServers: [],
+    selfId: "b",
+    sendSignal: (targetId, signal) => {
+      if (targetId === "a") void meshA.handleSignal("b", signal);
+    },
+    onRemoteStream: (id, stream) => bRemote.set(id, stream),
+    onStateChange: () => undefined,
+  });
+
+  const micA = new MockTrack("audio", "mic-a");
+  await meshA.setAudioTrack(micA as unknown as MediaStreamTrack);
+
+  // A is the deterministic initiator (id "a" < "b") and offers immediately.
+  meshA.ensurePeer("b");
+  MockPeerConnection.instances[0].onnegotiationneeded?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const connections = MockPeerConnection.instances;
+  const aConnection = connections[0];
+  const bConnection = connections.find((entry) => entry !== aConnection);
+  assert.ok(bConnection, "answerer created its peer connection");
+
+  // The browser delivers tracks via ontrack; fire it for each side.
+  const aAudioTx = aConnection.transceivers.find(
+    (entry) => entry.receiver.track.kind === "audio",
+  );
+  const bAudioTx = bConnection.transceivers.find(
+    (entry) => entry.receiver.track.kind === "audio",
+  );
+  assert.ok(aAudioTx && bAudioTx);
+  bConnection.ontrack?.({ track: bAudioTx.receiver.track } as unknown as RTCTrackEvent);
+  aConnection.ontrack?.({ track: aAudioTx.receiver.track } as unknown as RTCTrackEvent);
+  assert.ok(bRemote.get("a"), "B received A's audio track");
+  assert.ok(aRemote.get("b"), "A received B's (still silent) audio track");
+
+  // B had no microphone at answer time; the host's speak grant arrives now
+  // and B starts transmitting on the already-negotiated transceiver.
+  const micB = new MockTrack("audio", "mic-b");
+  await meshB.setAudioTrack(micB as unknown as MediaStreamTrack);
+  assert.equal(
+    bAudioTx.sender.track,
+    micB,
+    "B's mic must ride the existing sender without renegotiation",
+  );
+
+  // B's audio now flows; the receiver track unmutes on A's side.
+  aAudioTx.receiver.track.fire("unmute");
+  assert.ok(
+    aRemote.get("b")?.getTracks().includes(
+      aAudioTx.receiver.track as unknown as FakeTrack,
+    ),
+  );
+
+  // Mute/unmute cycles must remove and restore the sender track cleanly.
+  await meshA.setAudioTrack(null);
+  assert.equal(aAudioTx.sender.track, null);
+  await meshA.setAudioTrack(micA as unknown as MediaStreamTrack);
+  assert.equal(aAudioTx.sender.track, micA);
+
+  meshA.closeAll();
+  meshB.closeAll();
+});
+
+test("a lost answer is recovered by re-sending the pending offer", async () => {
+  const scheduled = new Map<unknown, () => void>();
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  globalThis.setTimeout = ((callback: () => void) => {
+    const id = Symbol("timer");
+    scheduled.set(id, callback);
+    return id;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((id: unknown) => {
+    scheduled.delete(id);
+  }) as unknown as typeof clearTimeout;
+
+  try {
+    const outgoing: Array<{ targetId: string; signal: RtcSignal }> = [];
+    const mesh = createMesh("a", outgoing).mesh;
+    mesh.ensurePeer("b");
+    const connection = MockPeerConnection.instances[0];
+    connection.onnegotiationneeded?.();
+    // The real timer, not the mock above, or the promise never settles.
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+    const firstOffer = outgoing.find((entry) => entry.signal.type === "offer");
+    assert.ok(firstOffer, "initial offer sent");
+
+    // The answer never arrives and the connection never comes up. Fire the
+    // connect watchdog: the offerer must re-send its pending offer rather
+    // than wait forever for a stable signaling state.    connection.connectionState = "connecting";
+    const watchdogs = [...scheduled.values()];
+    assert.equal(watchdogs.length, 1, "connect watchdog armed");
+    watchdogs[0]?.();
+    // Firing the watchdog schedules a 0-delay ICE restart through the mocked
+    // timer; drain the captured queue until the offer is re-sent.
+    for (let round = 0; round < 6; round += 1) {
+      await new Promise((resolve) => realSetTimeout(resolve, 0));
+      const pending = [...scheduled.entries()];
+      if (
+        pending.length === 0 ||
+        outgoing.filter((entry) => entry.signal.type === "offer").length > 1
+      ) {
+        break;
+      }
+      for (const [id, callback] of pending) {
+        scheduled.delete(id);
+        callback();
+      }
+    }
+
+    const reSends = outgoing.filter((entry) => entry.signal.type === "offer");
+    assert.ok(reSends.length > 1, "offer re-sent after the watchdog");
+    assert.equal(
+      (reSends[1].signal as { sdp: string }).sdp,
+      (firstOffer.signal as { sdp: string }).sdp,
+    );
+
+    mesh.closeAll();
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
+});
